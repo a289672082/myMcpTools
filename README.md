@@ -41,6 +41,14 @@ For an HTTP client:
 auto client = mymcp::Client::http("http://127.0.0.1:3000/mcp");
 ```
 
+## Executable feature and OAuth examples
+
+See **[examples/README.md](examples/README.md)** for a runnable tutorial covering typed tools, Schema validation, resources, URI templates, prompts, completion, paginated discovery, MRTR, Tasks, progress, stdio, HTTP, SSE subscriptions, and OAuth authorization/login.
+
+- `mymcp_showcase_server`, `mymcp_showcase_client`, `mymcp_showcase_subscribe`: runnable local MCP feature walkthrough.
+- `mymcp_oauth_login`: real authorization-code + PKCE example with loopback browser callback and in-memory tokens (requires an external OAuth provider).
+- `mymcp_oauth_resource_server`: **development-only** protected MCP server and Bearer callback; not a production JWT/OAuth verifier.
+
 ## Build
 
 Requirements (migration): C++20, CMake >= 3.20, OpenSSL, Threads, and a network connection for CMake to fetch pinned cpp-httplib and jsoncons sources. No Boost dependency.

@@ -68,3 +68,18 @@ install(EXPORT mymcpTargets NAMESPACE mymcp:: DESTINATION lib/cmake/mymcp)
 add_executable(mymcp_oauth_session_tests tests/test_oauth_session.cpp)
 target_link_libraries(mymcp_oauth_session_tests PRIVATE mymcp)
 add_test(NAME oauth_session COMMAND mymcp_oauth_session_tests)
+
+# Comprehensive, opt-in executable examples. Never used as production credential stores.
+foreach(example IN ITEMS showcase_server showcase_client showcase_subscribe oauth_login oauth_resource_server)
+  add_executable(mymcp_${example} examples/${example}.cpp)
+  target_link_libraries(mymcp_${example} PRIVATE mymcp)
+endforeach()
+if(Python3_Interpreter_FOUND)
+  add_test(NAME showcase_examples COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/showcase_smoke.py"
+    "$<TARGET_FILE:mymcp_showcase_server>" "$<TARGET_FILE:mymcp_showcase_client>"
+    "$<TARGET_FILE:mymcp_showcase_subscribe>")
+  add_test(NAME oauth_resource_example COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/oauth_resource_smoke.py"
+    "$<TARGET_FILE:mymcp_oauth_resource_server>")
+  set_tests_properties(showcase_examples PROPERTIES TIMEOUT 75)
+  set_tests_properties(oauth_resource_example PROPERTIES TIMEOUT 25)
+endif()
