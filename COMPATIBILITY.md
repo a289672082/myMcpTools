@@ -6,14 +6,14 @@ Updated October 31, 2026. **An actively developed subset implementation, not a f
 |---|---|---|
 | Core JSON-RPC | Request IDs, errors, typed tools, basic notifications | Strict wire-schema testing and malformed packet fuzzing |
 | Stateless modern lifecycle | `server/discover`, required version + client identity/capabilities in request `_meta`, server response metadata, `resultType` | Official conformance tests and interoperability with TS v2/Kotlin/C# |
-| Legacy 2025-11-25 | stdio `initialize` fallback | Legacy HTTP sessions / SSE, version-specific behavior parity |
+| Legacy 2025-11-25 | stdio and basic Streamable HTTP `initialize` fallback, stateless tool calls | GET-based notifications, session resume, complete historical feature parity |
 | Tools | Typed registration, jsoncons JSON Schema validation, context tools, async task tools, HTTP header annotations | Remote schema references, structured outputs/outputSchema validation; icons and annotations |
 | Resources | Plain text resources, basic URI template variables, update notification | Binary resources and full RFC6570 URI templates |
 | Prompts/completions | Rich prompt callback, arguments, completion callback | Schema validation and comprehensive field coverage |
 | List pagination/cache | Deterministic in-memory pagination, `ttlMs`, `cacheScope`; authenticated HTTP forces private scope | Snapshot cursors and cache revalidation |
 | MRTR | Basic `input_required` and retry with requestState | Full validation of sampling/elicitation, state security, all behaviors |
 | Tasks extension | Opt-in capability gate, cryptographic task IDs, poll, input-required/update, cooperative cancel, TTL expiry, HTTP routing headers | Durable persistence across restart; `taskIds` subscriptions/`notifications/tasks`; external task backend; interoperable conformance |
-| Request progress/cancellation | Concurrent stdio work, `notifications/progress` with monotonically increasing values, cooperative cancellation; sync client callback | HTTP response-scoped progress SSE and disconnect cancellation, configurable timeouts, robust stdio streaming API |
+| Request progress/cancellation | Concurrent stdio work, `notifications/progress`, cooperative cancellation; HTTP request-scoped progress SSE and incremental client callback | Prompt cancellation when a blocked HTTP handler receives disconnects, retries/timeouts, robust stdio streaming API |
 | Subscriptions | Explicit `subscriptions/listen`, acknowledge, filters, HTTP SSE, stdio cancellation | Task status subscriptions, reconnect/resume, graceful close API integration |
 | HTTP transport | 2026 header validation, 4MiB request limit, loopback listener, metadata and bearer verification callback | Network-facing native HTTPS server, authenticated reverse proxy deployment guides, load/DoS tuning, legacy HTTP sessions |
 | HTTPS client | TLS with peer/hostname verification (OpenSSL), configurable Bearer token | HTTPS SSE subscription path, timeouts/retries/cert pinning options |
@@ -45,7 +45,7 @@ This repository must not be advertised as full MCP 2026-07-28 compatible. OAuth 
   registration (when advertised), and refresh; clients can attach a Session using `Client::http_oauth`.
 - The OAuth server is a protected resource, not an authorization server; host apps supply a token
   validator and the AS endpoints separately.
-- No official MCP conformance, native TLS hosting, durable Tasks, full SSE request streaming, or secure
+- No official MCP conformance, native TLS hosting, durable Tasks, SSE replay/resumption, or secure
   automatic browser redirect receiver claims are made at this stage.
 
 
