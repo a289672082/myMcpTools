@@ -27,7 +27,7 @@ int main() {
   // Legacy stdio era: initialize and notifications/initialized, without modern _meta.
   Server legacy_server("legacy-test", "1.0");
   legacy_server.tool("echo", "Echo", [](std::string s){ return s; }, arg<std::string>("text"));
-  Client fallback([&](const Json& req){
+  Client fallback([&](const Json& req) -> Json {
     if (req.at("method") == "server/discover")
       return json::object{{"jsonrpc", "2.0"}, {"id", req.at("id")},
                   {"error", json::object{{"code", -32601}, {"message", "Method not found"}}}};

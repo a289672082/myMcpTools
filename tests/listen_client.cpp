@@ -4,7 +4,7 @@
 int main(int argc, char** argv) {
   if (argc != 2) return 1;
   bool received = false;
-  mymcp::Client::listen_http(argv[1], json::object{{"toolsListChanged", true}}, [&](const mymcp::Json& event) {
+  mymcp::Client::listen_http(argv[1], mymcp::json::object{{"toolsListChanged", true}}, [&](const mymcp::Json& event) {
     if (event.at("method") != "notifications/subscriptions/acknowledged")
       throw std::runtime_error("Expected subscription acknowledgement");
     received = true;

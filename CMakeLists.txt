@@ -63,3 +63,8 @@ endif()
 install(TARGETS mymcp EXPORT mymcpTargets ARCHIVE DESTINATION lib)
 install(DIRECTORY include/ DESTINATION include)
 install(EXPORT mymcpTargets NAMESPACE mymcp:: DESTINATION lib/cmake/mymcp)
+
+# Local mock OAuth authorization server: discovery, registration, PKCE, token exchange and refresh.
+add_executable(mymcp_oauth_session_tests tests/test_oauth_session.cpp)
+target_link_libraries(mymcp_oauth_session_tests PRIVATE mymcp)
+add_test(NAME oauth_session COMMAND mymcp_oauth_session_tests)
