@@ -179,3 +179,24 @@ server remains pluggable through `Server::protect_http(metadata, verifier)`, whe
 issuer, audience, expiration, subject and operation-level scopes.
 
 The migration must pass Linux + Windows CI before it is treated as a release.
+
+## Desktop OAuth callback helper
+
+```cpp
+auto session = std::make_shared<mymcp::oauth::Session>("https://mcp.example/mcp");
+session->discover();
+session->client_id("your-registered-client-id");
+auto flow = session->begin_authorization("http://127.0.0.1:8765/callback");
+// Open flow.url in the OS browser, then receive the redirect in your app.
+// The helper checks the full redirect URI, state, issuer and percent-encoding.
+session->exchange_callback_url(flow, received_callback_url,
+                               "http://127.0.0.1:8765/callback");
+auto client = mymcp::Client::http_oauth("https://mcp.example/mcp", session);
+auto tools = client.tools();  // refreshes expiring tokens automatically
+```
+
+Dynamic registration for a desktop/CLI app uses `application_type=native` by default,
+which is required for interoperability with some OpenID Connect servers. Web apps
+can pass `"web"` explicitly to `register_dynamic(redirects, name, "web")`.
+The host application still owns browser navigation, redirect listener and safe
+credential storage; this is **not** a built-in authorization server.

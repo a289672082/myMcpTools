@@ -63,9 +63,8 @@ Authorization begin(const std::string& authorization_endpoint,
   require_https(expected_issuer);
   if (client_id.empty() || redirect_uri.empty() || resource.empty())
     throw std::invalid_argument("OAuth requires client_id, redirect_uri and resource");
-  if (!resource.starts_with("https://") && !resource.starts_with("http://127.0.0.1") &&
-      !resource.starts_with("http://localhost"))
-    throw std::invalid_argument("OAuth resource must be HTTPS (or loopback)");
+  // Avoid prefix matches such as http://localhost.attacker.example.
+  require_https(resource);
   Authorization flow;
   flow.state = nonce(32);
   flow.code_verifier = nonce(48);

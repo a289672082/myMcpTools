@@ -22,6 +22,7 @@ int main() {
   });
   server.Post("/register", [](const httplib::Request& req, httplib::Response& res) {
     CHECK(req.body.find("redirect_uris") != std::string::npos);
+    CHECK(req.body.find("\"application_type\":\"native\"") != std::string::npos);
     res.set_content("{\"client_id\":\"local-client\"}","application/json");
     res.status = 201;
   });
@@ -48,9 +49,30 @@ int main() {
     auto token = session.exchange_code(flow,"sample-code",flow.state,origin,"http://127.0.0.1:49593/callback");
     CHECK(token.access_token=="token-1");
     CHECK(session.has_token());
+    const auto redirect = "http://127.0.0.1:49593/callback";
+    auto next_flow = session.begin_authorization(redirect);
+    auto callback = std::string(redirect) + "?code=sample-code&state=" +
+                    mymcp::oauth::url_encode(next_flow.state) + "&iss=" +
+                    mymcp::oauth::url_encode(origin);
+    try {
+      session.exchange_callback_url(next_flow, callback + "&state=duplicate", redirect);
+      CHECK(false);
+    } catch (const std::invalid_argument&) {}
+    try {
+      session.exchange_callback_url(next_flow, std::string(redirect)+
+        "?code=sample-code&state=wrong&iss="+mymcp::oauth::url_encode(origin), redirect);
+      CHECK(false);
+    } catch (const std::invalid_argument&) {}
+    try {
+      session.exchange_callback_url(next_flow, std::string(redirect)+
+        "?error=access_denied&state="+next_flow.state, redirect);
+      CHECK(false);
+    } catch (const std::runtime_error&) {}
+    auto callback_token = session.exchange_callback_url(next_flow, callback, redirect);
+    CHECK(callback_token.access_token=="token-1");
     CHECK(session.bearer_token()=="token-2");
     CHECK(session.bearer_token()=="token-2");
-    CHECK(exchanges==1 && refreshes==1);
+    CHECK(exchanges==2 && refreshes==1);
   } catch (...) { server.stop(); listener.join(); throw; }
   server.stop(); listener.join();
   std::cout << "OAuth session end-to-end test passed\n";

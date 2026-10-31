@@ -6,6 +6,8 @@
 #include <stdexcept>
 #include <sstream>
 #include <limits>
+#include <map>
+#include <string_view>
 
 namespace mymcp::oauth {
 namespace {
@@ -147,13 +149,25 @@ void Session::discover(){
   if(info.contains("authorization_response_iss_parameter_supported"))
     next.issuer_parameter_supported=info.at("authorization_response_iss_parameter_supported").as_bool();
   next.scopes_supported=strings(protected_resource,"scopes_supported");
+  // Client credentials and access tokens are bound to the issuer that minted them.
+  // Never silently reuse them if protected-resource metadata changes AS.
+  if(!metadata_.issuer.empty() && metadata_.issuer != next.issuer) {
+    std::lock_guard lock(mutex_);
+    token_ = Token{};
+    token_available_ = false;
+    client_id_.clear();
+  }
   metadata_=std::move(next);
 }
-std::string Session::register_dynamic(const std::vector<std::string>& redirects,std::string name){
+std::string Session::register_dynamic(const std::vector<std::string>& redirects,std::string name,
+                                      std::string application_type){
   if(metadata_.registration_endpoint.empty())throw std::runtime_error("Dynamic registration not advertised");
   if(redirects.empty())throw std::invalid_argument("Redirect URIs required");
+  if(application_type != "native" && application_type != "web")
+    throw std::invalid_argument("application_type must be native or web");
   Json body(jsoncons::json_object_arg);
   body["client_name"]=std::move(name);
+  body["application_type"]=std::move(application_type);
   body["token_endpoint_auth_method"]="none";
   body["grant_types"]=Json::make_array({"authorization_code","refresh_token"});
   Json r=jsoncons::json::make_array();for(const auto& u:redirects)r.push_back(u);
@@ -183,6 +197,65 @@ Token Session::exchange_code(const Authorization& flow,const std::string& code,
   auto t=parse_token(post_form(metadata_.token_endpoint,p));
   {std::lock_guard lock(mutex_);token_=t;token_available_=true;}
   return t;
+}
+Token Session::exchange_callback_url(const Authorization& flow,
+    const std::string& callback_url, const std::string& redirect_uri) {
+  if (redirect_uri != redirect_uri_ || callback_url.size() > 16384 ||
+      callback_url.find('#') != std::string::npos)
+    throw std::invalid_argument("Invalid OAuth callback URL");
+  const char separator = redirect_uri.find('?') == std::string::npos ? '?' : '&';
+  if (callback_url.size() <= redirect_uri.size() + 1 ||
+      callback_url.compare(0, redirect_uri.size(), redirect_uri) != 0 ||
+      callback_url[redirect_uri.size()] != separator)
+    throw std::invalid_argument("OAuth callback redirect URI mismatch");
+  // Strict percent-decoding; malformed escapes and duplicate keys are rejected.
+  auto decode = [](std::string_view input) {
+    auto hex = [](char c) -> int {
+      if (c >= '0' && c <= '9') return c - '0';
+      if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+      if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+      return -1;
+    };
+    std::string value;
+    for (std::size_t i = 0; i < input.size(); ++i) {
+      if (input[i] == '%') {
+        if (i + 2 >= input.size() || hex(input[i+1]) < 0 || hex(input[i+2]) < 0)
+          throw std::invalid_argument("Invalid OAuth callback encoding");
+        char byte = char((hex(input[i+1]) << 4) | hex(input[i+2]));
+        if (byte == '\0') throw std::invalid_argument("Invalid OAuth callback encoding");
+        value += byte;
+        i += 2;
+      } else if (input[i] == '+') value += ' ';
+      else value += input[i];
+    }
+    return value;
+  };
+  std::map<std::string, std::string> values;
+  const std::string_view query(callback_url.data() + redirect_uri.size() + 1,
+                               callback_url.size() - redirect_uri.size() - 1);
+  for (std::size_t pos = 0; pos < query.size();) {
+    const auto end = query.find('&', pos);
+    const auto part = query.substr(pos, end == std::string_view::npos ? end : end-pos);
+    const auto eq = part.find('=');
+    if (eq == std::string_view::npos || eq == 0)
+      throw std::invalid_argument("Invalid OAuth callback parameter");
+    auto key = decode(part.substr(0, eq));
+    auto value = decode(part.substr(eq+1));
+    if (!values.emplace(std::move(key), std::move(value)).second)
+      throw std::invalid_argument("Duplicate OAuth callback parameter");
+    if (end == std::string_view::npos) break;
+    pos = end + 1;
+  }
+  if (values.contains("error"))
+    throw std::runtime_error("OAuth authorization server returned an error");
+  auto code = values.find("code");
+  auto state = values.find("state");
+  if (code == values.end() || code->second.empty() || state == values.end())
+    throw std::invalid_argument("OAuth callback code or state missing");
+  const auto issuer = values.find("iss");
+  return exchange_code(flow, code->second, state->second,
+                       issuer == values.end() ? std::string{} : issuer->second,
+                       redirect_uri);
 }
 Token Session::refresh(){
   std::lock_guard lock(mutex_);

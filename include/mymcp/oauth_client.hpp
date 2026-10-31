@@ -37,14 +37,22 @@ public:
   // Use a pre-registered client ID or Client ID Metadata Document URL.
   void client_id(std::string value);
   // Optional RFC 7591 dynamic registration for servers that explicitly support it.
+  // "native" is the correct RFC 7591 / OIDC application_type for desktop and CLI clients.
+  // Remote hosted web apps may select "web" explicitly.
   std::string register_dynamic(const std::vector<std::string>& redirect_uris,
-                               std::string client_name = "myMcpTools");
+                               std::string client_name = "myMcpTools",
+                               std::string application_type = "native");
   Authorization begin_authorization(std::string redirect_uri,
                                      const std::vector<std::string>& scopes = {});
   // Validate state + issuer before using authorization code.
   Token exchange_code(const Authorization& flow, const std::string& code,
                       const std::string& callback_state, const std::string& callback_issuer,
                       const std::string& redirect_uri);
+  // Accepts the complete callback URL. Strictly matches the registered redirect,
+  // rejects duplicate/malformed parameters and authorization errors, then
+  // validates state+issuer before exchanging the code.
+  Token exchange_callback_url(const Authorization& flow, const std::string& callback_url,
+                              const std::string& redirect_uri);
   Token refresh();
   std::string bearer_token(); // refresh if nearing expiry, else return current token
   bool has_token() const;

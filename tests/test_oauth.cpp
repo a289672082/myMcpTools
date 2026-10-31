@@ -17,5 +17,8 @@ int main() {
   flow.issuer_parameter_supported = false;
   validate_callback(flow,flow.state,"");
   try {begin("http://evil.example", "https://auth.example", "id", "http://127.0.0.1", "https://mcp.example"); CHECK(false);} catch(const std::invalid_argument&){}
+  try {begin("https://auth.example/authorize", "https://auth.example", "id",
+      "http://127.0.0.1/callback", "http://localhost.attacker.example/mcp"); CHECK(false);
+  } catch(const std::invalid_argument&){}
   std::cout << "OAuth PKCE/issuer tests passed\n";
 }
