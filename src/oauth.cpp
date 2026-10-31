@@ -5,6 +5,7 @@
 #include <sstream>
 #include <iomanip>
 #include <string_view>
+#include <algorithm>
 
 namespace mymcp::oauth {
 namespace {
@@ -22,8 +23,23 @@ std::string nonce(std::size_t bytes) {
   return base64url(reinterpret_cast<const unsigned char*>(random.data()), bytes);
 }
 void require_https(const std::string& url) {
-  if (!url.starts_with("https://")) throw std::invalid_argument("OAuth endpoints must use HTTPS");
   if (url.find('#') != std::string::npos) throw std::invalid_argument("OAuth endpoint must not have a fragment");
+  if (url.starts_with("https://")) return;
+  // OAuth local-only development/testing is permitted over HTTP, but not any
+  // non-loopback host, and not a deceptive name such as localhost.example.com.
+  if (url.starts_with("http://")) {
+    const auto end = url.find_first_of("/?#", 7);
+    const std::string authority = url.substr(7, end == std::string::npos ? end : end - 7);
+    auto is_loopback_authority = [&](const std::string& host) {
+      if (authority == host) return true;
+      if (!authority.starts_with(host + ":")) return false;
+      const auto port = authority.substr(host.size() + 1);
+      return !port.empty() && std::all_of(port.begin(), port.end(), [](unsigned char c){ return c >= '0' && c <= '9'; });
+    };
+    if (is_loopback_authority("127.0.0.1") || is_loopback_authority("localhost") ||
+        is_loopback_authority("[::1]")) return;
+  }
+  throw std::invalid_argument("OAuth endpoints must use HTTPS (except loopback)");
 }
 }
 std::string url_encode(const std::string& input) {

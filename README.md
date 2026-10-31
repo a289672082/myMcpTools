@@ -16,7 +16,7 @@ int main() {
   server.tool("add", "Add integers", [](int a, int b) { return a + b; },
               arg<int>("a", "First number"), arg<int>("b", "Second number"));
   server.resource("app://status", "Status", [] { return std::string("OK"); });
-  server.prompt("welcome", "Welcome prompt", [](const json::object&) { return "Hi!"; });
+  server.prompt("welcome", "Welcome prompt", [](const Json&) { return "Hi!"; });
   server.run_stdio();                 // or server.run_http(3000)
 }
 ```
@@ -31,7 +31,7 @@ int main() {
   auto client = Client::process("./mymcp_example_server");
   auto info = client.discover();
   auto list = client.tools();
-  auto answer = client.call("add", {{"a", 1}, {"b", 2}});
+  auto answer = client.call("add", json::object{{"a", 1}, {"b", 2}});
 }
 ```
 
@@ -78,13 +78,13 @@ Implemented and covered by local tests:
 
 Still incomplete (important before production use):
 
-- Full JSON Schema 2020-12 validator, schema-derived output checking, argument constraints, typed content types and resource URI template operators beyond simple variables.
-- Full OAuth 2.1 client/resource server: protected-resource metadata, AS discovery, CIMD, PKCE, issuer validation, scope escalation, token refresh and audience checking. This library currently offers **no authentication**. HTTP binds loopback only and does not support native HTTPS; terminate TLS and enforce authentication in a trusted reverse proxy if required.
+- Remote schema retrieval and schema-derived output validation, typed content types and URI template operators beyond simple variables. The JSON Schema validator now uses jsoncons with 2020-12 support for local schemas.
+- OAuth gaps: an in-app browser/callback listener, secure persistent token storage, automatic authorization retry and incremental scope escalation, Client ID Metadata validation, and built-in JWT/JWKS verification. The client has discovery + PKCE + token/refresh flows; the server offers a Bearer verifier callback. The HTTP server binds loopback only; use a trusted HTTPS proxy for remote deployment.
 - Legacy HTTP session/handshake compatibility, asynchronous request cancellation outside subscriptions, progress and log notifications, and custom timeout/retry configuration.
 - Complete Tasks / Apps / EMA extension implementations (raw custom method dispatch and namespaced capability advertisement are available, but **do not** imply extension conformance).
 - Request-scoped SSE output from tool handlers, full stdio asynchronous client subscription management, stream restart resilience, cross-platform concurrency load testing, full official SDK conformance/interop tests.
 
-See [COMPATIBILITY.md](COMPATIBILITY.md) for a conservative per-feature matrix. Five local tests passing is not an official compliance certificate.
+See [COMPATIBILITY.md](COMPATIBILITY.md) for a conservative per-feature matrix. Passing local tests is not an official compliance certificate.
 
 ## New API examples
 
@@ -93,11 +93,11 @@ Server server("books", "1.0");
 server.cache(60000, "private");
 server.page_size(50);
 server.resource_template("books://{id}", "Book",
-  [](const std::string& uri, const json::object& vars) -> Json {
-    return {{"contents", json::array{{{"uri", uri},
+  [](const std::string& uri, const Json& vars) -> Json {
+    return json::object{{"contents", json::array{json::object{{"uri", uri},
       {"text", std::string(vars.at("id").as_string())}}}}};
   });
-server.completion([](const json::object&) -> Json {
+server.completion([](const Json&) -> Json {
   return {{"completion", {{"values", json::array{"cpp", "c++"}}, {"hasMore", false}}}};
 });
 
@@ -144,9 +144,9 @@ The server task registry is process-local, **not durable across restarts**. HTTP
 
 A stdio server may report progress from inside an active tool handler using `server.progress(value, total, "message")`, and honor cancellation using `server.is_cancelled()`; the client can use `request_with_progress` and a `Client::process` notification callback. HTTP request-scoped progress is not yet implemented.
 
-For protected HTTP, `server.protect_http(protected_resource_metadata, token_verifier)` installs the metadata endpoint and authorization callback. The verifier must validate issuer, audience, expiry and required scopes. The example server's `--http-auth` is only a local integration test using the `MYMCP_TEST_TOKEN` environment variable. `Client::http("https://host/mcp", token)` validates TLS certificates/hostnames and includes a Bearer token. `mymcp/oauth.hpp` provides PKCE S256 and `state`/`iss` helpers for a host-managed OAuth authorization code flow; it does **not** implement automatic OAuth discovery, token exchange or refresh.
+For protected HTTP, `server.protect_http(protected_resource_metadata, token_verifier)` installs the metadata endpoint and authorization callback. The verifier must validate issuer, audience, expiry and required scopes. The example server's `--http-auth` is only a local integration test using the `MYMCP_TEST_TOKEN` environment variable. `Client::http("https://host/mcp", token)` validates TLS certificates/hostnames and includes a Bearer token. `mymcp/oauth_client.hpp` provides OAuth metadata discovery, PKCE S256, registration, token exchange and refresh. It does **not** independently implement interactive browser login or durable token storage.
 
-All raw tool handlers are now checked against the supported JSON Schema assertion subset (see `include/mymcp/schema.hpp`). Schema violations return JSON-RPC `-32602`, not tool `isError`. Full JSON Schema 2020-12 validation and official conformance testing remain outstanding. See [COMPATIBILITY.md](COMPATIBILITY.md) and [SECURITY.md](SECURITY.md).
+All raw tool handlers are checked with jsoncons JSON Schema validation (see `include/mymcp/schema.hpp`). Schema violations return JSON-RPC `-32602`, not tool `isError`. Remote schema reference handling and official MCP conformance testing remain outstanding. See [COMPATIBILITY.md](COMPATIBILITY.md) and [SECURITY.md](SECURITY.md).
 
 ## Dependency migration (C++20 / cpp-httplib / jsoncons)
 
