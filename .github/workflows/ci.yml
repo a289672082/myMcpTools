@@ -16,7 +16,7 @@ jobs:
       - name: Build
         run: cmake --build build --parallel 2
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build --output-on-failure --timeout 25
   windows:
     runs-on: windows-2022
     steps:
@@ -26,4 +26,16 @@ jobs:
       - name: Build
         run: cmake --build build --config Debug --parallel 2
       - name: Test
-        run: ctest --test-dir build -C Debug --output-on-failure
+        run: ctest --test-dir build -C Debug --output-on-failure --timeout 25
+
+      - name: Diagnose Windows C++ test exit codes
+        if: always()
+        shell: pwsh
+        run: |
+          foreach ($test in @('protocol', 'extended', 'tasks_schema')) {
+            $bin = "build/Debug/mymcp_${test}_tests.exe"
+            if (Test-Path $bin) {
+              & $bin
+              Write-Host "TESTEXIT $test $LASTEXITCODE"
+            }
+          }
