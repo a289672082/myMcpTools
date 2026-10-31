@@ -131,6 +131,8 @@ void SkillLibrary::load(const std::filesystem::path& directory) {
            directory, std::filesystem::directory_options::skip_permission_denied)) {
     if (!entry.is_regular_file() || entry.path().filename() != "SKILL.md") continue;
     std::string contents = read_file(entry.path(), MaxSkillBytes);
+    // Normalize CRLF: Windows text-mode SKILL.md files use \r\n.
+    contents.erase(std::remove(contents.begin(), contents.end(), '\r'), contents.end());
     std::string name = entry.path().parent_path().filename().string();
     std::string description;
     if (contents.rfind("---\n", 0) == 0) {
