@@ -73,6 +73,11 @@ The previous command-line-driven `showcase_*`, `oauth_login.cpp` and `oauth_reso
 
 The SDK is still experimental; these demos do **not** establish full MCP 2026-07-28 conformance. See [`COMPATIBILITY.md`](../COMPATIBILITY.md).
 
+
+### Streamable HTTP + request-scoped SSE
+
+Start `run_http_server_demo`, then run `run_http_progress_demo` (no flags). The tool sends five real-time `notifications/progress` SSE events and a final JSON-RPC response; ordinary fast tools still return `application/json`. For Codex and Claude Code configuration see [`../INTEROPERABILITY.md`](../INTEROPERABILITY.md).
+
 ## 一个 Demo：10 组智能体必备工具（中文注释）
 
 新增 **`run_agent_tools_demo.cpp`**：单个 C++20 stdio MCP Server 提供 10 组共 23 个真实工具，直接运行 `run_agent_tools_demo`，不接受任何命令行参数。
