@@ -224,9 +224,13 @@ public:
   static Client process(const std::string& executable, std::vector<std::string> args = {},
                         std::function<void(const Json&)> on_notification = {});
   // HTTPS verifies server certificates and hostnames against system trust roots.
-  static Client http(const std::string& url, std::string bearer_token = {});
+  // Callback receives request-scoped SSE notifications (including progress).
+  // Version discovery automatically falls back to legacy Streamable HTTP.
+  static Client http(const std::string& url, std::string bearer_token = {},
+                     std::function<void(const Json&)> on_notification = {});
   // OAuth-backed HTTP transport: acquire tokens with oauth::Session first.
-  static Client http_oauth(const std::string& url, std::shared_ptr<oauth::Session> session);
+  static Client http_oauth(const std::string& url, std::shared_ptr<oauth::Session> session,
+                           std::function<void(const Json&)> on_notification = {});
   // Blocks while a long-lived HTTP subscription is open. Return false to disconnect.
   static void listen_http(const std::string& url, Json notifications,
                           std::function<bool(const Json&)> on_event);

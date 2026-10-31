@@ -7,7 +7,7 @@ import time
 import urllib.request
 import urllib.error
 
-http_server, http_client, subscriber, protected_server, protected_client = sys.argv[1:6]
+http_server, http_client, subscriber, http_progress, protected_server, protected_client = sys.argv[1:7]
 
 def started(port):
     for _ in range(160):
@@ -34,6 +34,7 @@ try:
     started(33867)
     execute(http_client, "run_http_client_demo OK")
     execute(subscriber, "run_subscriptions_demo OK")
+    execute(http_progress, "run_http_progress_demo OK")
 finally:
     stop(server)
 

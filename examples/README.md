@@ -72,3 +72,8 @@ Then rebuild and run `./run_oauth_login_demo`. It opens a local callback listene
 The previous command-line-driven `showcase_*`, `oauth_login.cpp` and `oauth_resource_server.cpp` files have moved to `tests/fixtures/` to keep existing integration tests without exposing old parameter-driven examples. They are compiled only as test fixtures. All files in `examples/` now use the independent `run_xxxx_demo` entrypoint convention.
 
 The SDK is still experimental; these demos do **not** establish full MCP 2026-07-28 conformance. See [`COMPATIBILITY.md`](../COMPATIBILITY.md).
+
+
+### Streamable HTTP + request-scoped SSE
+
+Start `run_http_server_demo`, then run `run_http_progress_demo` (no flags). The tool sends five real-time `notifications/progress` SSE events and a final JSON-RPC response; ordinary fast tools still return `application/json`. For Codex and Claude Code configuration see [`../INTEROPERABILITY.md`](../INTEROPERABILITY.md).

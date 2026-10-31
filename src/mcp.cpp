@@ -876,7 +876,8 @@ std::string header(const httplib::Request& request, const std::string& name) {
   return request.has_header(name) ? request.get_header_value(name) : std::string{};
 }
 HttpReply on_http(Server& server, const httplib::Request& req,
-                  const std::string& bind_host, unsigned short port) {
+                  const std::string& bind_host, unsigned short port,
+                  bool validate_only = false) {
   Json id = nullptr;
   if (req.path != "/mcp")
     return {404, rpc_error(id, -32601, "MCP endpoint is POST /mcp"), {}};
@@ -913,22 +914,35 @@ HttpReply on_http(Server& server, const httplib::Request& req,
               "Bearer resource_metadata=\"" + base + "/.well-known/oauth-protected-resource\""};
     }
   }
+  // Pre-2026 Codex/Claude clients use initialize and per-connection style
+  // requests without the 2026 _meta contract. Older Streamable HTTP servers
+  // may omit MCP-Session-Id entirely; we do so here to remain stateless.
   const std::string ver = string_of(meta, "io.modelcontextprotocol/protocolVersion");
-  if (ver.empty() || header(req, "MCP-Protocol-Version") != ver ||
-      header(req, "Mcp-Method") != method)
-    return {400, rpc_error(id, -32020, "HeaderMismatch: version or method"), {}};
-  if (ver != ProtocolVersion)
-    return {400, rpc_error(id, -32022, "Unsupported protocol version",
-             json::object{{"requested", ver}, {"supported", json::array{ProtocolVersion}} }), {}};
-  if (method == "tools/call" || method == "resources/read" || method == "prompts/get" ||
-      method == "tasks/get" || method == "tasks/update" || method == "tasks/cancel") {
+  const std::string version_header = header(req, "MCP-Protocol-Version");
+  const bool legacy = ver.empty();
+  if (legacy) {
+    if (!version_header.empty() && version_header != LegacyProtocolVersion &&
+        version_header != "2025-06-18" && version_header != "2025-03-26")
+      return {400, rpc_error(id, -32022, "Unsupported protocol version",
+               json::object{{"requested", version_header},
+                            {"supported", json::array{ProtocolVersion, LegacyProtocolVersion,
+                                                       "2025-06-18", "2025-03-26"}}}), {}};
+  } else {
+    if (version_header != ver || header(req, "Mcp-Method") != method)
+      return {400, rpc_error(id, -32020, "HeaderMismatch: version or method"), {}};
+    if (ver != ProtocolVersion)
+      return {400, rpc_error(id, -32022, "Unsupported protocol version",
+               json::object{{"requested", ver}, {"supported", json::array{ProtocolVersion}}}), {}};
+  }
+  if (!legacy && (method == "tools/call" || method == "resources/read" || method == "prompts/get" ||
+      method == "tasks/get" || method == "tasks/update" || method == "tasks/cancel")) {
     const std::string expected = string_of(params, method == "resources/read" ? "uri" :
                             method.starts_with("tasks/") ? "taskId" : "name");
     const auto decoded = decode_header(header(req, "Mcp-Name"));
     if (!decoded || *decoded != expected)
       return {400, rpc_error(id, -32020, "HeaderMismatch: Mcp-Name"), {}};
   }
-  if (method == "tools/call") {
+  if (!legacy && method == "tools/call") {
     const auto schema = server.tool_schema(string_of(params, "name"));
     if (schema) try {
       for (const auto& field : header_fields(*schema)) {
@@ -943,7 +957,10 @@ HttpReply on_http(Server& server, const httplib::Request& req,
       }
     } catch (const Error& e) {return {400, rpc_error(id, -32020, e.what()), {}};}
   }
-  Json response = server.handle(body, false);
+  // Streamable HTTP may return JSON for quick requests, or SSE for a
+  // request carrying a progressToken. Validation must finish before headers.
+  if (validate_only) return {200, nullptr, {}};
+  Json response = server.handle(body, legacy);
   if (response.is_null()) return {202, nullptr, {}};
   if (find(response, "error").is_object() && find(find(response, "error"), "code").is_int64() &&
       find(find(response, "error"), "code").as_integer<std::int64_t>() == -32601)
@@ -966,10 +983,43 @@ void Server::run_http(unsigned short port, std::string host) {
     if (!http_requires_auth()) { response.status=404; return; }
     response.set_content(json::serialize(protected_resource_metadata()), "application/json");
   });
+  // The old Streamable HTTP GET notification channel is deliberately not
+  // opened (clients can use request-scoped SSE; 2026 uses subscriptions/listen).
+  server.Get("/mcp", [](const auto&, auto& out) {
+    out.status = 405;
+    out.set_header("Allow", "POST");
+  });
   server.Post("/mcp", [this, host, port](const httplib::Request& req, httplib::Response& out) {
-    auto checked = on_http(*this, req, host, port);
     Json body = nullptr;
     try {body = json::parse(req.body);} catch (...) {}
+    const Json& token = find(find(find(body, "params"), "_meta"), "progressToken");
+    const bool stream_progress = string_of(body, "method") == "tools/call" &&
+        (token.is_string() || token.is_int64() || token.is_uint64());
+    auto checked = on_http(*this, req, host, port, stream_progress);
+    if (stream_progress) {
+      if (checked.status != 200) { reply(out, checked); return; }
+      out.set_header("Cache-Control", "no-cache");
+      out.set_header("X-Accel-Buffering", "no");
+      const bool legacy = string_of(find(find(body, "params"), "_meta"),
+                                    "io.modelcontextprotocol/protocolVersion").empty();
+      out.set_chunked_content_provider("text/event-stream",
+        [this, body, token, legacy](std::size_t, httplib::DataSink& sink) {
+          ActiveRequest context;
+          context.token = token;
+          context.emit = [&sink, &context](const Json& message) {
+            const auto data = "data: " + json::serialize(message) + "\n\n";
+            if (!sink.write(data.data(), data.size())) context.cancelled = true;
+          };
+          {
+            RequestGuard guard(&context);
+            Json response = handle(body, legacy);
+            if (!context.cancelled.load() && !response.is_null()) context.emit(response);
+          }
+          sink.done();
+          return false;
+        });
+      return;
+    }
     if (string_of(body, "method") != "subscriptions/listen" || checked.status != 404 ||
         string_of(find(checked.json_result, "error"), "message") != "Method not found: subscriptions/listen") {
       reply(out, checked); return;
@@ -1119,18 +1169,26 @@ struct HttpState {
   std::mutex mutex;
   std::string token;
   std::shared_ptr<oauth::Session> oauth_session;
+  std::function<void(const Json&)> on_notification;
   explicit HttpState(const std::string& path,std::string bearer):url(parse_url(path)),token(std::move(bearer)){}
   Json send(const Json& msg) {
     std::lock_guard lock(mutex);
     const auto method=string_of(msg,"method");
     const Json& params=find(msg,"params");
-    httplib::Headers headers{{"Accept","application/json, text/event-stream"},
-        {"MCP-Protocol-Version",ProtocolVersion},{"Mcp-Method",method}};
+    httplib::Headers headers{{"Accept","application/json, text/event-stream"}};
+    const auto version = string_of(find(params,"_meta"), "io.modelcontextprotocol/protocolVersion");
+    const bool legacy = version.empty();
+    if (!legacy) {
+      headers.emplace("MCP-Protocol-Version", version);
+      headers.emplace("Mcp-Method", method);
+    } else if (method != "initialize") {
+      headers.emplace("MCP-Protocol-Version", LegacyProtocolVersion);
+    }
     const std::string bearer = oauth_session ? oauth_session->bearer_token() : token;
     if(!bearer.empty())headers.emplace("Authorization","Bearer "+bearer);
-    if(method=="tools/call"||method=="prompts/get"||method=="resources/read"||method.starts_with("tasks/"))
+    if(!legacy && (method=="tools/call"||method=="prompts/get"||method=="resources/read"||method.starts_with("tasks/")))
       headers.emplace("Mcp-Name",encode_header(string_of(params,method=="resources/read"?"uri":method.starts_with("tasks/")?"taskId":"name")));
-    if(method=="tools/call"){
+    if(!legacy && method=="tools/call"){
       auto it=tool_schemas.find(string_of(params,"name"));
       if(it!=tool_schemas.end())for(const auto& field:header_fields(it->second)){
         const Json& value=path_value(find(params,"arguments"),field.path);
@@ -1138,20 +1196,57 @@ struct HttpState {
       }
     }
     auto c=new_http_client(url);
-    auto response=c->Post(url.target,headers,json::serialize(msg),"application/json");
+    // Read SSE progressively rather than buffering the response body until
+    // completion. A progress notification can now reach the app immediately.
+    std::string pending;
+    std::string decode_error;
+    Json streamed_result = nullptr;
+    auto response=c->Post(url.target, headers, json::serialize(msg), "application/json",
+      [&](const char* data, std::size_t length) -> bool {
+        pending.append(data, length);
+        if (pending.size() > 4 * 1024 * 1024) {
+          decode_error = "HTTP response/SSE frame too large";
+          return false;
+        }
+        for (;;) {
+          auto end = pending.find("\n\n");
+          if (end == std::string::npos) break;
+          std::string frame = pending.substr(0, end);
+          pending.erase(0, end + 2);
+          std::istringstream lines(frame);
+          std::string line, event_data;
+          while (std::getline(lines, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.starts_with("data:")) {
+              if (!event_data.empty()) event_data += '\n';
+              auto data = line.substr(5);
+              if (!data.empty() && data.front() == ' ') data.erase(0,1);
+              event_data += data;
+            }
+          }
+          if (event_data.empty()) continue;
+          try {
+            Json event = json::parse(event_data);
+            if (find(event,"id") == find(msg,"id") && event.contains("id"))
+              streamed_result = std::move(event);
+            else if (find(event,"method").is_string() && on_notification)
+              on_notification(event);
+          } catch (const std::exception& e) {
+            decode_error = std::string("Malformed SSE response: ") + e.what();
+            return false;
+          }
+        }
+        return true;
+      });
+    if (!decode_error.empty()) throw std::runtime_error(decode_error);
     if(!response)throw std::runtime_error("HTTP transport error: "+httplib::to_string(response.error()));
     if(response->status==202)return nullptr;
     if(response->get_header_value("Content-Type").starts_with("text/event-stream")){
-      std::istringstream in(response->body);std::string line;Json result=nullptr;
-      while(std::getline(in,line))if(line.starts_with("data:")){
-        auto event=json::parse(line.substr(5));
-        if(find(event,"id")==find(msg,"id"))result=std::move(event);
-      }
-      if(result.is_null())throw std::runtime_error("SSE stream closed without matching result");
-      return result;
+      if(streamed_result.is_null())throw std::runtime_error("SSE stream closed without matching result");
+      return streamed_result;
     }
-    if(response->body.empty())throw std::runtime_error("Empty HTTP response");
-    return json::parse(response->body);
+    if (pending.empty()) throw std::runtime_error("Empty HTTP response");
+    return json::parse(pending);
   }
 };
 } // namespace
@@ -1196,19 +1291,21 @@ Client Client::process(const std::string& executable, std::vector<std::string> a
   auto state = std::make_shared<ProcessState>(executable, args, std::move(on_notification));
   return Client([state](const Json& message){ return state->send(message); });
 }
-Client Client::http(const std::string& url, std::string bearer_token) {
+Client Client::http(const std::string& url, std::string bearer_token,
+                    std::function<void(const Json&)> on_notification) {
   auto state = std::make_shared<HttpState>(url, std::move(bearer_token));
+  state->on_notification = std::move(on_notification);
   Client client([state](const Json& message){ return state->send(message); });
-  client.allow_legacy_ = false; // HTTP legacy needs session transport, intentionally unsupported here.
   client.http_ = true;
   return client;
 }
-Client Client::http_oauth(const std::string& url, std::shared_ptr<oauth::Session> session) {
+Client Client::http_oauth(const std::string& url, std::shared_ptr<oauth::Session> session,
+                          std::function<void(const Json&)> on_notification) {
   if (!session) throw std::invalid_argument("OAuth session is null");
   auto state = std::make_shared<HttpState>(url, std::string{});
   state->oauth_session = std::move(session);
+  state->on_notification = std::move(on_notification);
   Client client([state](const Json& message){ return state->send(message); });
-  client.allow_legacy_ = false;
   client.http_ = true;
   return client;
 }

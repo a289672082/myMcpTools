@@ -88,7 +88,7 @@ endif()
 # no-argument main() that calls it; the command line is never used for setup.
 foreach(demo IN ITEMS
   tools resources prompts mrtr tasks extensions stdio_server stdio_client
-  http_server http_client subscriptions oauth oauth_login oauth_resource oauth_resource_client progress)
+  http_server http_client http_progress subscriptions oauth oauth_login oauth_resource oauth_resource_client progress)
   add_executable(run_${demo}_demo examples/run_${demo}_demo.cpp)
   target_link_libraries(run_${demo}_demo PRIVATE mymcp)
   target_include_directories(run_${demo}_demo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples)
@@ -110,7 +110,25 @@ if(Python3_Interpreter_FOUND)
   add_test(NAME demo_http_and_sse
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/run_demo_smoke.py"
       "$<TARGET_FILE:run_http_server_demo>" "$<TARGET_FILE:run_http_client_demo>"
-      "$<TARGET_FILE:run_subscriptions_demo>" "$<TARGET_FILE:run_oauth_resource_demo>"
+      "$<TARGET_FILE:run_subscriptions_demo>" "$<TARGET_FILE:run_http_progress_demo>" "$<TARGET_FILE:run_oauth_resource_demo>"
       "$<TARGET_FILE:run_oauth_resource_client_demo>")
   set_tests_properties(demo_http_and_sse PROPERTIES TIMEOUT 35)
+endif()
+
+# Simulated Codex/Claude legacy Streamable HTTP handshake, plus request-scoped
+# SSE progress and cancellation/error-frame protocol regression checks.
+if(Python3_Interpreter_FOUND)
+  add_test(NAME http_streamable_compat
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/http_streamable_compat.py"
+      "$<TARGET_FILE:mymcp_example_server>")
+  set_tests_properties(http_streamable_compat PROPERTIES TIMEOUT 25)
+endif()
+
+add_executable(mymcp_legacy_http_client_tests tests/legacy_http_client.cpp)
+target_link_libraries(mymcp_legacy_http_client_tests PRIVATE mymcp)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME legacy_http_client
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/legacy_http_client.py"
+      "$<TARGET_FILE:mymcp_legacy_http_client_tests>")
+  set_tests_properties(legacy_http_client PROPERTIES TIMEOUT 20)
 endif()

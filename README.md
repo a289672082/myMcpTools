@@ -43,7 +43,7 @@ auto client = mymcp::Client::http("http://127.0.0.1:3000/mcp");
 
 ## Standalone no-argument demos
 
-See **[examples/README.md](examples/README.md)**. Every demonstration is a standalone executable named `run_xxxx_demo`, containing a matching `run_xxxx_demo()` function and a zero-argument `main()`. Examples include `run_tools_demo`, `run_resources_demo`, `run_prompts_demo`, `run_tasks_demo`, `run_mrtr_demo`, `run_stdio_client_demo` and `run_oauth_demo` (local mock OAuth). The old CLI-driven examples are retained only as integration test fixtures in `tests/fixtures/`.
+See **[examples/README.md](examples/README.md)**. Every demonstration is a standalone executable named `run_xxxx_demo`, containing a matching `run_xxxx_demo()` function and a zero-argument `main()`. Examples include `run_tools_demo`, `run_resources_demo`, `run_prompts_demo`, `run_tasks_demo`, `run_mrtr_demo`, `run_stdio_client_demo`, `run_progress_demo` and `run_oauth_demo` (local mock OAuth). The old CLI-driven examples are retained only as integration test fixtures in `tests/fixtures/`.
 
 ## Build
 
@@ -224,3 +224,29 @@ For HTTP and SSE, launch `run_http_server_demo` in another terminal, then run
 configuration constants in `examples/run_oauth_login_demo.cpp` and run it.
 See [the demo guide](examples/README.md). Old parameterized executables are
 retained only in `tests/fixtures/` for regression testing.
+
+
+## Codex / Claude Code and Streamable HTTP
+
+Use Streamable HTTP as the preferred network transport; **SSE is a response format inside it**, not a separate transport. The HTTP SDK now supports modern `2026-07-28` requests, a basic legacy Streamable HTTP adapter (2025-03-26 to 2025-11-25), and tool progress over request-scoped SSE. See [INTEROPERABILITY.md](INTEROPERABILITY.md) for connection commands, compatibility limits and security instructions.
+
+A tool can report progress without caring whether it runs on stdio or HTTP:
+
+```cpp
+server.add_tool("count", "Report progress", mymcp::json::object{{"type", "object"}},
+  [&server](const mymcp::Json&) -> mymcp::Json {
+    for (int i = 1; i <= 5 && !server.is_cancelled(); ++i) server.progress(i, 5, "Working");
+    return mymcp::detail::make_tool_result("done");
+  });
+```
+
+In an HTTP client, install a progress event callback and include a `progressToken`:
+
+```cpp
+auto client = mymcp::Client::http("http://127.0.0.1:3000/mcp", {},
+  [](const mymcp::Json& event) { /* handle notifications/progress */ });
+auto result = client.request_with_progress("tools/call",
+  mymcp::json::object{{"name", "count"}, {"arguments", mymcp::json::object{}}}, "my-token");
+```
+
+To run a complete no-argument client/server pair, start `run_http_server_demo`, then `run_http_progress_demo` in another terminal.

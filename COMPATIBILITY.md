@@ -47,3 +47,10 @@ This repository must not be advertised as full MCP 2026-07-28 compatible. OAuth 
   validator and the AS endpoints separately.
 - No official MCP conformance, native TLS hosting, durable Tasks, full SSE request streaming, or secure
   automatic browser redirect receiver claims are made at this stage.
+
+
+## Streamable HTTP compatibility addition
+
+- **New:** HTTP `tools/call` with `progressToken` returns request-scoped `text/event-stream` containing progress notifications followed by the final JSON-RPC result; `Client::http` accepts an event callback and parses events incrementally.
+- **New:** Basic legacy HTTP initialize, list/call/read support (`2025-03-26`, `2025-06-18`, `2025-11-25`) with no server-issued session ID. Legacy GET `/mcp` explicitly returns 405 (no GET SSE notification stream).
+- **Remaining limitations:** Some legacy clients need server-to-client sampling/elicitation, GET-based resource change streams, session resumption, or complete 2025 feature parity; those are not provided. A dropped HTTP connection only marks a cooperative tool cancelled once an SSE write fails. Actual Codex and Claude Code application-level integration is not part of CI.
