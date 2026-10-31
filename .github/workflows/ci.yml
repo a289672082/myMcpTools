@@ -12,7 +12,7 @@ jobs:
       - name: Install build prerequisites
         run: sudo apt-get update && sudo apt-get install -y cmake libssl-dev ninja-build python3
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DFETCHCONTENT_FULLY_DISCONNECTED=ON
       - name: Build
         run: cmake --build build --parallel 2
       - name: Test
@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Configure
-        run: cmake -S . -B build -A x64 -DCMAKE_BUILD_TYPE=Debug
+        run: cmake -S . -B build -A x64 -DCMAKE_BUILD_TYPE=Debug -DFETCHCONTENT_FULLY_DISCONNECTED=ON
       - name: Build
         run: cmake --build build --config Debug --parallel 2
       - name: Test
