@@ -95,7 +95,7 @@ try:
     conn.close()
     progress = [e["params"]["progress"] for e in events if e.get("method") == "notifications/progress"]
     final = [e for e in events if e.get("id") == 44]
-    assert progress == [1, 2, 3, 4, 5], events
+    assert progress == list(range(1, 51)), (len(progress), progress[:4], progress[-4:])
     assert len(final) == 1 and final[0]["result"]["resultType"] == "complete", events
     print("Modern/legacy HTTP and request-scoped SSE progress passed")
 finally:
