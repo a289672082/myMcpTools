@@ -6,7 +6,7 @@ import time
 import urllib.request
 import urllib.error
 
-http_server, http_client, subscriber, protected_server = sys.argv[1:5]
+http_server, http_client, subscriber, protected_server, protected_client = sys.argv[1:6]
 
 def started(port):
     for _ in range(160):
@@ -43,6 +43,7 @@ try:
     with urllib.request.urlopen(url, timeout=3) as response:
         metadata = response.read().decode()
         assert 'authorization_servers' in metadata
+    execute(protected_client, "run_oauth_resource_client_demo OK")
     request = urllib.request.Request('http://127.0.0.1:33868/mcp', method='POST',
        data=b'{}', headers={'Content-Type': 'application/json'})
     try:

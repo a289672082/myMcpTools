@@ -24,12 +24,14 @@ For Visual Studio multi-config builds, add `--config Debug` to the build command
 | `run_extensions_demo` | Extension capability and custom method | None |
 | `run_stdio_client_demo` | Launch `run_stdio_server_demo`, discover and call a tool over stdio | Automatically finds its companion executable |
 | `run_stdio_server_demo` | Stdio MCP server reading JSON-RPC from stdin | Started by stdio client (or host application) |
+| `run_progress_demo` | Report progress notifications from a stdio tool | Automatically starts stdio server |
 | `run_http_server_demo` | Loopback HTTP server, tools, resources and publishing | Leave running in terminal 1 |
 | `run_http_client_demo` | HTTP MCP client requests | Run HTTP server first |
 | `run_subscriptions_demo` | SSE subscription, acknowledgement and resource-update event | Run HTTP server first |
 | `run_oauth_demo` | **No-credential mock OAuth**: discovery, native registration, PKCE S256, callback, token exchange | None |
 | `run_oauth_login_demo` | Real OAuth server with browser callback and bearer-protected MCP calls | Edit config in source, use a real OAuth provider |
 | `run_oauth_resource_demo` | Protected Resource Metadata, 401 challenge, local-only fixed demo Bearer verifier | Leave running in terminal; **development only** |
+| `run_oauth_resource_client_demo` | Send a mock Bearer token to the local protected resource server | Run `run_oauth_resource_demo` first |
 
 ### Start two HTTP examples with no arguments
 
