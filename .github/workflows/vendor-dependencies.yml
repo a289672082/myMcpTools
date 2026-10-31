@@ -1,0 +1,61 @@
+name: Vendor dependencies into offline source tree
+on:
+  push:
+    branches: [feature/vendor-deps-offline-2026]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  vendor-and-verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check out full pinned dependency sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          clone_at() {
+            local name="$1" upstream="$2" revision="$3" tempdir
+            tempdir="$(mktemp -d)"
+            git clone --quiet --filter=blob:none "$upstream" "$tempdir/repo"
+            git -C "$tempdir/repo" checkout --quiet --detach "$revision"
+            mkdir -p "third_party/$name"
+            cp -a "$tempdir/repo/." "third_party/$name/"
+            rm -rf "third_party/$name/.git" "$tempdir"
+            test -f "third_party/$name/LICENSE"
+          }
+          clone_at jsoncons https://github.com/danielaparker/jsoncons.git 91c5e03f9169f2accecf3d5c082163d6a2f34b18
+          clone_at cpp-httplib https://github.com/yhirose/cpp-httplib.git a18895f42e4768062b858c6847b1ae598b2a3be3
+          test -f third_party/jsoncons/include/jsoncons/json.hpp
+          test -f third_party/jsoncons/include/jsoncons_ext/jsonschema/jsonschema.hpp
+          test -f third_party/cpp-httplib/httplib.h
+          du -sh third_party/jsoncons third_party/cpp-httplib
+      - name: Commit complete upstream sources to GitHub branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add third_party/jsoncons third_party/cpp-httplib
+          if ! git diff --cached --quiet; then
+            git commit -m "vendor: include full pinned jsoncons and cpp-httplib source"
+            git push origin HEAD:feature/vendor-deps-offline-2026
+          fi
+      - name: Configure fully offline
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DFETCHCONTENT_FULLY_DISCONNECTED=ON
+      - name: Build all SDK and demo targets
+        run: cmake --build build --parallel 2
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure --timeout 25
+      - name: Verify SDK installation includes dependency headers and licenses
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --install build --prefix "$RUNNER_TEMP/mymcp-install"
+          test -f "$RUNNER_TEMP/mymcp-install/include/jsoncons/json.hpp"
+          test -f "$RUNNER_TEMP/mymcp-install/include/jsoncons_ext/jsonschema/jsonschema.hpp"
+          test -f "$RUNNER_TEMP/mymcp-install/include/httplib.h"
+          test -f "$RUNNER_TEMP/mymcp-install/share/mymcp/licenses/jsoncons-LICENSE"
+          test -f "$RUNNER_TEMP/mymcp-install/share/mymcp/licenses/cpp-httplib-LICENSE"
