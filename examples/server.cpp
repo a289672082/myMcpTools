@@ -14,7 +14,7 @@ int main(int argc, char** argv) {
               arg<std::string>("name", "Person's name"));
   server.resource("demo://status", "Status", [] { return std::string("healthy"); });
   server.prompt("welcome", "A welcome prompt", [](const mymcp::Json&) { return "Welcome to the MCP server."; });
-  server.add_tool("count_with_progress", "Count while reporting progress", {{"type", "object"}},
+  server.add_tool("count_with_progress", "Count while reporting progress", json::object{{"type", "object"}},
      [&server](const Json&) -> Json {
        for (int i = 1; i <= 50; ++i) {
          if (server.is_cancelled()) break;
@@ -28,7 +28,7 @@ int main(int argc, char** argv) {
     if (!secret || !*secret) return 2;
     unsigned short port = argc >= 3 ? static_cast<unsigned short>(std::stoi(argv[2])) : 3000;
     const std::string expected(secret);
-    server.protect_http({{"resource", "http://127.0.0.1:" + std::to_string(port) + "/mcp"},
+    server.protect_http(json::object{{"resource", "http://127.0.0.1:" + std::to_string(port) + "/mcp"},
                          {"authorization_servers", json::array{"https://auth.example"}}},
        [expected](const std::string& token, const std::string&, const std::string&) {
          return token.size() == expected.size() &&

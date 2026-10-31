@@ -7,8 +7,8 @@
 #define CHECK(x) do { if(!(x)) throw std::runtime_error("assertion failed: " #x); } while (0)
 using namespace mymcp;
 int main() {
-  Json nested = { {"type", "object"}, {"required", json::array{"name", "count"}},
-    {"additionalProperties", false}, {"properties", {
+  Json nested = json::object{ {"type", "object"}, {"required", json::array{"name", "count"}},
+    {"additionalProperties", false}, {"properties", json::object{
       {"name", json::object{{"type", "string"}, {"minLength", 2}, {"pattern", "^[A-Z]"}}},
       {"count", json::object{{"type", "integer"}, {"minimum", 1}, {"maximum", 5}}}}}};
   std::string error;
@@ -28,8 +28,8 @@ int main() {
   });
   srv.add_tool("background", "Run task", json::object{{"type", "object"}}, [&](const Json&) -> Json {
     return srv.start_task([](const Json& responses, std::atomic_bool& cancelled)->Json {
-      if (cancelled.load()) return { {"content", json::array{}} };
-      if (responses.is_null()) return {
+      if (cancelled.load()) return json::object{{"content", json::array{}}};
+      if (responses.is_null()) return json::object{
         {"resultType", "input_required"},
         {"inputRequests", json::object{{"confirm", json::object{{"method", "elicitation/create"},
            {"params", json::object{{"mode", "form"}, {"message", "Continue?"},

@@ -1,3 +1,6 @@
+#ifndef NOMINMAX
+#define NOMINMAX 1
+#endif
 #include "mymcp/mcp.hpp"
 #include "mymcp/schema.hpp"
 #include "mymcp/oauth_client.hpp"
@@ -173,13 +176,13 @@ void paginate_list(Json& values, const Json& params, Json& result,
       throw Error(-32602, "Invalid cursor");
     try {
       const auto number = std::stoull(digits);
-      if (number > std::numeric_limits<std::size_t>::max()) throw std::out_of_range("cursor");
+      if (number > (std::numeric_limits<std::size_t>::max)()) throw std::out_of_range("cursor");
       offset = static_cast<std::size_t>(number);
     } catch (...) { throw Error(-32602, "Invalid cursor"); }
     if (offset >= total) throw Error(-32602, "Expired or invalid cursor");
   }
   json::array page;
-  const std::size_t end = offset + std::min(page_size, total - offset);
+  const std::size_t end = offset + (std::min)(page_size, total - offset);
   for (auto i = offset; i < end; ++i) page.push_back(values[i]);
   values = std::move(page);
   if (end < total) result["nextCursor"] = method + ":" + std::to_string(end);
