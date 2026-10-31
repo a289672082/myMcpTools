@@ -35,3 +35,26 @@ inline value* if_contains(value& obj, std::string_view key) {
     return it == obj.object_range().end() ? nullptr : &it->value();
 }
 }
+
+// jsoncons's templated conversion constructor otherwise selects the generic
+// reflection path for these light convenience wrappers instead of base copying.
+namespace jsoncons {
+template<class Json>
+struct json_type_traits<Json, mymcp::json::object, void> {
+  using allocator_type = typename Json::allocator_type;
+  static Json to_json(const mymcp::json::object& v, const allocator_type&) {
+    return static_cast<const mymcp::json::value&>(v);
+  }
+  static bool is(const Json& v) noexcept { return v.is_object(); }
+  static mymcp::json::object as(const Json& v) { return mymcp::json::object(v); }
+};
+template<class Json>
+struct json_type_traits<Json, mymcp::json::array, void> {
+  using allocator_type = typename Json::allocator_type;
+  static Json to_json(const mymcp::json::array& v, const allocator_type&) {
+    return static_cast<const mymcp::json::value&>(v);
+  }
+  static bool is(const Json& v) noexcept { return v.is_array(); }
+  static mymcp::json::array as(const Json& v) { return mymcp::json::array(v); }
+};
+}

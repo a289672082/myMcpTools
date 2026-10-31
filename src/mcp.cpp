@@ -45,7 +45,7 @@ std::string string_of(const Json& obj, std::string_view key, std::string fallbac
   return v.is_string() ? std::string(v.as_string()) : fallback;
 }
 Json rpc_error(Json id, int code, std::string message, Json data = nullptr) {
-  json::object ejson::object{{"code", code}, {"message", std::move(message)}};
+  json::object e{{"code", code}, {"message", std::move(message)}};
   if (!data.is_null()) e["data"] = std::move(data);
   return json::object{{"jsonrpc", "2.0"}, {"id", std::move(id)}, {"error", std::move(e)}};
 }
@@ -548,7 +548,7 @@ Json Server::handle(const Json& req, bool allow_legacy) {
     }
     if (method == "server/discover") {
       if (!modern) throw Error(-32601, "Method not found");
-      json::object capabilitiesjson::object{{"tools", json::object{}}, {"resources", json::object{}},
+      json::object capabilities{{"tools", json::object{}}, {"resources", json::object{}},
                                 {"prompts", json::object{}}};
       if (completion_) capabilities["completions"] = json::object{};
       if (!extensions_.empty()) capabilities["extensions"] = extensions_;
@@ -1121,7 +1121,7 @@ struct HttpState {
     std::lock_guard lock(mutex);
     const auto method=string_of(msg,"method");
     const Json& params=find(msg,"params");
-    httplib::Headers headersjson::object{{"Accept","application/json, text/event-stream"},
+    httplib::Headers headers{{"Accept","application/json, text/event-stream"},
         {"MCP-Protocol-Version",ProtocolVersion},{"Mcp-Method",method}};
     const std::string bearer = oauth_session ? oauth_session->bearer_token() : token;
     if(!bearer.empty())headers.emplace("Authorization","Bearer "+bearer);
@@ -1163,7 +1163,7 @@ void Client::listen_http(const std::string& url, Json notifications,
          {"io.modelcontextprotocol/clientInfo",json::object{{"name","mymcp-listener"},{"version","1.0"}}}}}}}};
   auto c=new_http_client(target);
   c->set_read_timeout(3600,0);
-  httplib::Headers headersjson::object{{"Accept","application/json, text/event-stream"},
+  httplib::Headers headers{{"Accept","application/json, text/event-stream"},
     {"MCP-Protocol-Version",ProtocolVersion},{"Mcp-Method","subscriptions/listen"}};
   std::string pending;
   bool continue_reading=true;
