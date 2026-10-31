@@ -4,30 +4,25 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Threads REQUIRED)
 find_package(OpenSSL REQUIRED)
-include(FetchContent)
-# Pinned reviewed upstream revisions; header-only components are fetched at configure time.
-FetchContent_Declare(cpp_httplib
- GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
- GIT_TAG a18895f42e4768062b858c6847b1ae598b2a3be3
- GIT_SHALLOW FALSE)
-FetchContent_Declare(jsoncons
- GIT_REPOSITORY https://github.com/danielaparker/jsoncons.git
- GIT_TAG 91c5e03f9169f2accecf3d5c082163d6a2f34b18
- GIT_SHALLOW FALSE)
-FetchContent_GetProperties(cpp_httplib)
-if(NOT cpp_httplib_POPULATED)
- FetchContent_Populate(cpp_httplib)
-endif()
-FetchContent_GetProperties(jsoncons)
-if(NOT jsoncons_POPULATED)
- FetchContent_Populate(jsoncons)
-endif()
+# The checked-in third_party sources are always used (no configuration-time downloads).
+set(MYMCP_JSONCONS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/jsoncons")
+set(MYMCP_HTTPLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cpp-httplib")
+foreach(vendored_header IN ITEMS
+    "${MYMCP_JSONCONS_DIR}/include/jsoncons/json.hpp"
+    "${MYMCP_JSONCONS_DIR}/include/jsoncons_ext/jsonschema/jsonschema.hpp"
+    "${MYMCP_JSONCONS_DIR}/LICENSE"
+    "${MYMCP_HTTPLIB_DIR}/httplib.h"
+    "${MYMCP_HTTPLIB_DIR}/LICENSE")
+  if(NOT EXISTS "${vendored_header}")
+    message(FATAL_ERROR "Vendored dependency is missing: ${vendored_header}; see third_party/README.md")
+  endif()
+endforeach()
 add_library(mymcp STATIC src/mcp.cpp src/schema.cpp src/oauth.cpp src/oauth_client.cpp)
 target_include_directories(mymcp PUBLIC
  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
  $<INSTALL_INTERFACE:include>
- $<BUILD_INTERFACE:${jsoncons_SOURCE_DIR}/include>
- $<BUILD_INTERFACE:${cpp_httplib_SOURCE_DIR}>)
+ $<BUILD_INTERFACE:${MYMCP_JSONCONS_DIR}/include>
+ $<BUILD_INTERFACE:${MYMCP_HTTPLIB_DIR}>)
 target_compile_definitions(mymcp PUBLIC CPPHTTPLIB_OPENSSL_SUPPORT)
 target_link_libraries(mymcp PUBLIC Threads::Threads OpenSSL::SSL OpenSSL::Crypto)
 if(WIN32)
@@ -62,6 +57,10 @@ if(Python3_Interpreter_FOUND)
 endif()
 install(TARGETS mymcp EXPORT mymcpTargets ARCHIVE DESTINATION lib)
 install(DIRECTORY include/ DESTINATION include)
+install(DIRECTORY "${MYMCP_JSONCONS_DIR}/include/" DESTINATION include)
+install(FILES "${MYMCP_HTTPLIB_DIR}/httplib.h" DESTINATION include)
+install(FILES "${MYMCP_JSONCONS_DIR}/LICENSE" DESTINATION share/mymcp/licenses RENAME jsoncons-LICENSE)
+install(FILES "${MYMCP_HTTPLIB_DIR}/LICENSE" DESTINATION share/mymcp/licenses RENAME cpp-httplib-LICENSE)
 install(EXPORT mymcpTargets NAMESPACE mymcp:: DESTINATION lib/cmake/mymcp)
 
 # Local mock OAuth authorization server: discovery, registration, PKCE, token exchange and refresh.
