@@ -73,4 +73,5 @@ int main() {
   try { cli.read("test://missing"); CHECK(false); }
   catch (const Error& e) { CHECK(e.code == -32602); }
   std::cout << "Schema and tasks tests passed\n";
+  return 0;
 }

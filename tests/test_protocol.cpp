@@ -64,4 +64,5 @@ int main() {
   });
   REQUIRE(mrtr_client.call("ask").at("content")[0].at("text") == "accepted");
   std::cout << "Protocol tests passed\n";
+  return 0;
 }

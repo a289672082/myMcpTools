@@ -53,4 +53,5 @@ int main() {
   VERIFY(sub->messages[2].at("params").at("uri") == "test://books/12");
   VERIFY(sub->messages[2].at("params").at("_meta").at("io.modelcontextprotocol/subscriptionId") == "my-sub");
   std::cout << "Extended protocol tests passed\n";
+  return 0;
 }

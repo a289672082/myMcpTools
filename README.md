@@ -98,21 +98,21 @@ server.resource_template("books://{id}", "Book",
       {"text", std::string(vars.at("id").as_string())}}}}};
   });
 server.completion([](const Json&) -> Json {
-  return {{"completion", {{"values", json::array{"cpp", "c++"}}, {"hasMore", false}}}};
+  return json::object{{"completion", json::object{{"values", json::array{"cpp", "c++"}}, {"hasMore", false}}}};
 });
 
 // Consumers can transparently aggregate all pages:
 auto all = client.list_all("tools/list", "tools");
 
 // HTTP notifications: callback returns false to close the SSE connection.
-Client::listen_http("http://127.0.0.1:3000/mcp", {{"toolsListChanged", true}},
+Client::listen_http("http://127.0.0.1:3000/mcp", json::object{{"toolsListChanged", true}},
   [](const Json& event) {
     std::cout << json::serialize(event) << "\n";
     return true;
   });
 ```
 
-For stdio/HTTP subscriptions, event producers call `server.publish("notifications/tools/list_changed")` or `server.publish("notifications/resources/updated", {{"uri", "..."}})`. The SDK enforces the requested subscription filter and sends an acknowledgment first. Tool catalogs should be registered before starting the server; dynamic mutation of handler maps is not currently thread safe.
+For stdio/HTTP subscriptions, event producers call `server.publish("notifications/tools/list_changed")` or `server.publish("notifications/resources/updated", json::object{{"uri", "..."}})`. The SDK enforces the requested subscription filter and sends an acknowledgment first. Tool catalogs should be registered before starting the server; dynamic mutation of handler maps is not currently thread safe.
 
 ## Spec references
 
