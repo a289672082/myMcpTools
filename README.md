@@ -250,3 +250,7 @@ auto result = client.request_with_progress("tools/call",
 ```
 
 To run a complete no-argument client/server pair, start `run_http_server_demo`, then `run_http_progress_demo` in another terminal.
+
+## All-in-one agent toolbox demo
+
+**`examples/run_agent_tools_demo.cpp`** is a single no-argument stdio MCP server that registers 23 useful tools across 10 groups: file reads/writes, directories, filename/content search, precise edits/patches, Git, allowlisted commands and a fixed build example, restricted HTTPS fetch/download, and C++ project inspection. The implementation has Chinese inline comments and runs within an automatically created `demo_workspace/` directory. It is intended for local Codex/Claude MCP experiments, **not** a hardened sandbox. See [examples/README.md](examples/README.md) for the complete tool matrix, security limits, and usage.
