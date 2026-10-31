@@ -61,22 +61,58 @@ Run the server and client from the `build` directory:
 
 On Windows use the `.exe` variants (and adjust the child executable path in the example). The HTTP server accepts an optional port: `--http 4000`.
 
-## Implemented now
+## Protocol coverage — October 2026
 
-- Modern `2026-07-28` JSON-RPC request envelope (`_meta.protocolVersion`, client identity/capabilities) and response metadata
-- `server/discover`, including `supportedVersions`, capabilities, identity, and the new `resultType: complete`
-- `tools/list`, `tools/call`, `resources/list`, `resources/read`, `resources/templates/list`, `prompts/list`, `prompts/get`
-- stdio newline-delimited messages; local-only synchronous Streamable HTTP POST, JSON response; basic HTTP header validation and optional `x-mcp-header` mirroring
-- Dual-era stdio support: modern `server/discover`, legacy `initialize`/`notifications/initialized`, and 2025 response shape
-- Basic typed tool arguments (integer, number, boolean, string, optional), JSON Schema generation; std::string/primitive/JSON tool results
+**Target: MCP specification 2026-07-28. Experimental SDK, NOT full conformance.**
 
-## Known gaps / constraints
+Implemented and covered by local tests:
 
-- **Not full protocol conformance**: no subscription/listen streaming, OAuth authorization, progress handling, dynamic list-change notifications, detailed pagination/cache semantics, complete JSON Schema validation, or MCP extension implementations. Legacy HTTP sessions are not implemented.
-- Client can perform modern-first stdio negotiation with legacy fallback and basic multi-round-trip elicitation via `on_input_required` callback. It does not yet cover the full capability matrix or server-side legacy MRTR shim.
-- HTTP is synchronous `http://` only: no TLS, OAuth, SSE result streaming for subscriptions, or legacy HTTP sessions; use loopback or an authenticated TLS reverse proxy for local testing.
-- Avoid exposing this prototype over public networks. Origin checking is intentionally restrictive, and HTTP handlers are synchronous.
-- Calls are synchronous and single-threaded per client. For production use add concurrency/timeouts, full request validation, and comprehensive interoperability tests with the official MCP SDKs.
+- Modern stateless request metadata and `resultType`, `server/discover`, legacy stdio fallback.
+- Typed C++ tool registration, tool listing/calling, raw handlers for rich tool results.
+- Resources and URI templates (simple `{variable}` expansion), full prompt-result handlers and completion.
+- Deterministic listing and opaque cursor pagination for tools/resources/prompts/templates; caching `ttlMs` and `cacheScope` on all six required operations.
+- MRTR `input_required` on valid operations, client-side callback and `requestState` round trips.
+- `subscriptions/listen`: stdio acknowledgement and cancellation, HTTP long-lived SSE with acknowledgement/keepalive, per-subscription filters and explicit `Server::publish(...)`, `Client::listen_http(...)`.
+- Custom method handler and extension-capability advertisement APIs.
+- Streamable HTTP POST routing/header verification, `x-mcp-header` projection, origin checks, loopback-only listener. Request-scoped SSE response consumption on the client; JSON responses on the server.
+
+Still incomplete (important before production use):
+
+- Full JSON Schema 2020-12 validator, schema-derived output checking, argument constraints, typed content types and resource URI template operators beyond simple variables.
+- Full OAuth 2.1 client/resource server: protected-resource metadata, AS discovery, CIMD, PKCE, issuer validation, scope escalation, token refresh and audience checking. This library currently offers **no authentication**. HTTP binds loopback only and does not support native HTTPS; terminate TLS and enforce authentication in a trusted reverse proxy if required.
+- Legacy HTTP session/handshake compatibility, asynchronous request cancellation outside subscriptions, progress and log notifications, and custom timeout/retry configuration.
+- Complete Tasks / Apps / EMA extension implementations (raw custom method dispatch and namespaced capability advertisement are available, but **do not** imply extension conformance).
+- Request-scoped SSE output from tool handlers, full stdio asynchronous client subscription management, stream restart resilience, cross-platform concurrency load testing, full official SDK conformance/interop tests.
+
+See [COMPATIBILITY.md](COMPATIBILITY.md) for a conservative per-feature matrix. Five local tests passing is not an official compliance certificate.
+
+## New API examples
+
+```cpp
+Server server("books", "1.0");
+server.cache(60000, "private");
+server.page_size(50);
+server.resource_template("books://{id}", "Book",
+  [](const std::string& uri, const json::object& vars) -> Json {
+    return {{"contents", json::array{{{"uri", uri},
+      {"text", std::string(vars.at("id").as_string())}}}}};
+  });
+server.completion([](const json::object&) -> Json {
+  return {{"completion", {{"values", json::array{"cpp", "c++"}}, {"hasMore", false}}}};
+});
+
+// Consumers can transparently aggregate all pages:
+auto all = client.list_all("tools/list", "tools");
+
+// HTTP notifications: callback returns false to close the SSE connection.
+Client::listen_http("http://127.0.0.1:3000/mcp", {{"toolsListChanged", true}},
+  [](const Json& event) {
+    std::cout << json::serialize(event) << "\n";
+    return true;
+  });
+```
+
+For stdio/HTTP subscriptions, event producers call `server.publish("notifications/tools/list_changed")` or `server.publish("notifications/resources/updated", {{"uri", "..."}})`. The SDK enforces the requested subscription filter and sends an acknowledgment first. Tool catalogs should be registered before starting the server; dynamic mutation of handler maps is not currently thread safe.
 
 ## Spec references
 

@@ -3,6 +3,11 @@
 #include <boost/json.hpp>
 #include <functional>
 #include <map>
+#include <cstddef>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <set>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -39,6 +44,7 @@ template<class T> Json schema() {
   else if constexpr (std::is_integral_v<T>) return {{"type", "integer"}};
   else if constexpr (std::is_floating_point_v<T>) return {{"type", "number"}};
   else if constexpr (std::is_same_v<T, std::string>) return {{"type", "string"}};
+  else if constexpr (std::is_same_v<T, Json>) return json::object{};
   else return {{"type", "object"}};
 }
 template<class T> T decode(const Json& j) {
@@ -63,6 +69,7 @@ template<class T> T get_arg(const json::object& args, const Arg<T>& spec) {
   const auto* p = args.if_contains(spec.name);
   if (!p || p->is_null()) {
     if constexpr (optional_type<T>::value) return std::nullopt;
+    if (!spec.required) return T{};
     throw Error(-32602, "Missing argument: " + spec.name);
   }
   try { return decode<T>(*p); }
@@ -117,6 +124,28 @@ public:
   }
   void resource(std::string uri, std::string name, std::function<std::string()> reader, std::string mime_type = "text/plain");
   void prompt(std::string name, std::string description, std::function<std::string(const json::object&)> reader);
+  // Higher-level APIs preserve the full MCP JSON result representation.
+  void resource_template(std::string uri_template, std::string name,
+                         std::function<Json(const std::string&, const json::object&)> reader,
+                         std::string mime_type = "text/plain", std::string description = "");
+  void prompt_full(std::string name, std::string description,
+                   std::function<Json(const json::object&)> handler,
+                   Json arguments = json::array{});
+  void completion(std::function<Json(const json::object&)> handler);
+  void method(std::string method_name, std::function<Json(const json::object&)> handler);
+  void extension(std::string extension_id, Json settings = json::object{});
+  void cache(std::uint64_t ttl_ms, std::string scope = "public");
+  void page_size(std::size_t size);
+  struct Subscription {
+    Json id, notifications;
+    std::mutex mutex;
+    std::condition_variable ready;
+    std::deque<Json> messages;
+    bool closed = false;
+  };
+  // Raw subscription stream primitives for transports (notification filters are enforced here).
+  std::shared_ptr<Subscription> subscribe(Json id, Json filter);
+  void publish(const std::string& method, Json params = json::object{});
   void instructions(std::string value) { instructions_ = std::move(value); }
   Json handle(const Json& request, bool allow_legacy = true); // JSON-RPC request -> response; null for notifications
   void run_stdio();
@@ -125,11 +154,25 @@ public:
 private:
   struct Tool { std::string description; Json schema; ToolHandler handler; bool with_context = false; };
   struct Resource { std::string name; std::string mime; std::function<std::string()> reader; };
-  struct Prompt { std::string description; std::function<std::string(const json::object&)> reader; };
+  struct Prompt { std::string description; std::function<std::string(const json::object&)> reader;
+                  std::function<Json(const json::object&)> full_reader; Json arguments = json::array{}; };
+  struct ResourceTemplate {
+    std::string name, mime, description;
+    std::function<Json(const std::string&, const json::object&)> reader;
+  };
   std::string name_, version_, instructions_;
   std::map<std::string, Tool> tools_;
   std::map<std::string, Resource> resources_;
   std::map<std::string, Prompt> prompts_;
+  std::map<std::string, ResourceTemplate> templates_;
+  std::map<std::string, std::function<Json(const json::object&)>> methods_;
+  std::function<Json(const json::object&)> completion_;
+  json::object extensions_;
+  std::uint64_t ttl_ms_ = 0;
+  std::string cache_scope_ = "public";
+  std::size_t page_size_ = 100;
+  std::mutex subscriber_mutex_;
+  std::vector<std::weak_ptr<Subscription>> subscribers_;
   bool legacy_initialized_ = false;
 };
 
@@ -138,6 +181,9 @@ public:
   explicit Client(std::function<Json(const Json&)> send, std::string name = "mymcp-client");
   static Client process(const std::string& executable, std::vector<std::string> args = {});
   static Client http(const std::string& url);
+  // Blocks while a long-lived HTTP subscription is open. Return false to disconnect.
+  static void listen_http(const std::string& url, Json notifications,
+                          std::function<bool(const Json&)> on_event);
   Json discover();
   Json request(const std::string& method, Json params = json::object{});
   Json tools();
@@ -146,6 +192,11 @@ public:
   Json read(const std::string& uri);
   Json prompts();
   Json get_prompt(const std::string& name, Json arguments = json::object{});
+  Json resource_templates();
+  Json complete(Json ref, std::string argument_name, std::string value,
+                Json context = json::object{});
+  Json list_all(const std::string& method, const std::string& array_field);
+  void extension(std::string name, Json settings = json::object{});
   Json capabilities() const { return capabilities_; }
   // Callback receives inputRequests and returns a JSON object keyed by request IDs.
   // The SDK retries the original request with inputResponses and the opaque requestState.
