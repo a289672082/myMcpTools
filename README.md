@@ -47,7 +47,7 @@ See **[examples/README.md](examples/README.md)**. Every demonstration is a stand
 
 ## Build
 
-Requirements (migration): C++20, CMake >= 3.20, OpenSSL, Threads, and a network connection for CMake to fetch pinned cpp-httplib and jsoncons sources. No Boost dependency.
+Requirements (migration): C++20, CMake >= 3.20, OpenSSL, Threads, and the checked-in third-party sources (`third_party/jsoncons` and `third_party/cpp-httplib`). Configuration and builds are offline by default. No Boost dependency; OpenSSL remains a system prerequisite.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
