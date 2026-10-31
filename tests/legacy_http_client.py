@@ -13,7 +13,11 @@ class OldPeer(BaseHTTPRequestHandler):
         payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
         method = payload["method"]
         self.seen.append(method)
-        assert "Mcp-Method" not in self.headers, (method, dict(self.headers))
+        if method == "server/discover":
+            assert self.headers.get("Mcp-Method") == "server/discover"
+            assert self.headers.get("MCP-Protocol-Version") == "2026-07-28"
+        else:
+            assert "Mcp-Method" not in self.headers, (method, dict(self.headers))
         if method == "server/discover":
             result = {"jsonrpc": "2.0", "id": payload["id"],
                       "error": {"code": -32601, "message": "Method not found"}}
