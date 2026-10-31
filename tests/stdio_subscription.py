@@ -9,7 +9,8 @@ try:
     request = {'jsonrpc': '2.0', 'id': 'sub1', 'method': 'subscriptions/listen',
                'params': {'notifications': {'toolsListChanged': True},
                           '_meta': {'io.modelcontextprotocol/protocolVersion': '2026-07-28',
-                                    'io.modelcontextprotocol/clientCapabilities': {}}}}
+                                    'io.modelcontextprotocol/clientCapabilities': {},
+                                    'io.modelcontextprotocol/clientInfo': {'name': 'python-test', 'version': '1'}}}}
     p.stdin.write(json.dumps(request) + '\n')
     p.stdin.flush()
     first = json.loads(p.stdout.readline())

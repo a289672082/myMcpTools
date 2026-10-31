@@ -28,6 +28,7 @@ try:
         params["_meta"] = {
             "io.modelcontextprotocol/protocolVersion": "2026-07-28",
             "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {"name": "python-test", "version": "1"},
         }
         body = {"jsonrpc": "2.0", "id": 8, "method": method, "params": params}
         hs = {

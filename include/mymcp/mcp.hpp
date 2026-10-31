@@ -5,6 +5,9 @@
 #include <map>
 #include <cstddef>
 #include <condition_variable>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <deque>
 #include <mutex>
 #include <set>
@@ -90,9 +93,13 @@ class Server {
 public:
   explicit Server(std::string name, std::string version = "1.0.0");
   using ToolHandler = std::function<Json(const json::object&)>;
+  using TaskHandler = std::function<Json(const Json& input_responses, std::atomic_bool& cancelled)>;
   void add_tool(std::string name, std::string description, Json input_schema, ToolHandler handler);
   // Low-level advanced handler receives all tools/call params, including MRTR inputResponses.
   void add_tool_context(std::string name, std::string description, Json input_schema, ToolHandler handler);
+  // Task-aware tool registration: only invokes handler when client advertises Tasks.
+  void add_task_tool(std::string name, std::string description, Json input_schema,
+                     TaskHandler handler);
 
   // C++ equivalent of Kotlin's addTool, including automatic JSON schema and argument conversion.
   template<class F, class... Ts>
@@ -136,6 +143,12 @@ public:
   void extension(std::string extension_id, Json settings = json::object{});
   void cache(std::uint64_t ttl_ms, std::string scope = "public");
   void page_size(std::size_t size);
+  // Tasks extension (opt-in). Task IDs are unguessable; registry is process-local.
+  void enable_tasks();
+  // Call from a tools/call handler to return a task handle immediately.
+  Json start_task(TaskHandler handler, std::uint64_t ttl_ms = 3600000, std::uint64_t poll_ms = 1000);
+  // Returns a snapshot of task state, for programmatic inspection.
+  Json task_state(const std::string& id);
   struct Subscription {
     Json id, notifications;
     std::mutex mutex;
@@ -146,13 +159,28 @@ public:
   // Raw subscription stream primitives for transports (notification filters are enforced here).
   std::shared_ptr<Subscription> subscribe(Json id, Json filter);
   void publish(const std::string& method, Json params = json::object{});
+  void close_subscription(const std::shared_ptr<Subscription>& sub);
   void instructions(std::string value) { instructions_ = std::move(value); }
   Json handle(const Json& request, bool allow_legacy = true); // JSON-RPC request -> response; null for notifications
+  // Only stdio currently supports request-scoped progress/cancellation.
+  void progress(double value, std::optional<double> total = std::nullopt,
+                std::string message = {});
+  bool is_cancelled() const;
   void run_stdio();
+  // Optional OAuth resource-server boundary: the callback MUST validate the
+  // token's issuer, audience, expiration and scopes; the SDK never trusts raw JWT claims.
+  using TokenVerifier = std::function<bool(const std::string& token,
+                                          const std::string& method,
+                                          const std::string& name)>;
+  void protect_http(Json protected_resource_metadata, TokenVerifier verifier);
+  bool verify_http(const std::string& token, const std::string& method,
+                   const std::string& name) const;
+  Json protected_resource_metadata() const { return protected_resource_metadata_; }
+  bool http_requires_auth() const { return static_cast<bool>(token_verifier_); }
   void run_http(unsigned short port = 3000, std::string host = "127.0.0.1");
   const Json* tool_schema(const std::string& name) const;
 private:
-  struct Tool { std::string description; Json schema; ToolHandler handler; bool with_context = false; };
+  struct Tool { std::string description; Json schema; ToolHandler handler; bool with_context = false; bool requires_tasks = false; };
   struct Resource { std::string name; std::string mime; std::function<std::string()> reader; };
   struct Prompt { std::string description; std::function<std::string(const json::object&)> reader;
                   std::function<Json(const json::object&)> full_reader; Json arguments = json::array{}; };
@@ -173,19 +201,36 @@ private:
   std::size_t page_size_ = 100;
   std::mutex subscriber_mutex_;
   std::vector<std::weak_ptr<Subscription>> subscribers_;
+  struct TaskState {
+    std::mutex mutex;
+    std::atomic_bool cancel_requested{false};
+    Json details;
+    std::chrono::steady_clock::time_point expires_at;
+    TaskHandler handler;
+    json::object responses;
+    std::set<std::string> used_input_ids;
+  };
+  void run_task(const std::shared_ptr<TaskState>& task, Json input_responses);
+  std::mutex task_mutex_;
+  std::map<std::string, std::shared_ptr<TaskState>> tasks_;
+  TokenVerifier token_verifier_;
+  Json protected_resource_metadata_ = nullptr;
   bool legacy_initialized_ = false;
 };
 
 class Client {
 public:
   explicit Client(std::function<Json(const Json&)> send, std::string name = "mymcp-client");
-  static Client process(const std::string& executable, std::vector<std::string> args = {});
-  static Client http(const std::string& url);
+  static Client process(const std::string& executable, std::vector<std::string> args = {},
+                        std::function<void(const Json&)> on_notification = {});
+  // HTTPS verifies server certificates and hostnames against system trust roots.
+  static Client http(const std::string& url, std::string bearer_token = {});
   // Blocks while a long-lived HTTP subscription is open. Return false to disconnect.
   static void listen_http(const std::string& url, Json notifications,
                           std::function<bool(const Json&)> on_event);
   Json discover();
   Json request(const std::string& method, Json params = json::object{});
+  Json request_with_progress(const std::string& method, Json params, Json progress_token);
   Json tools();
   Json call(const std::string& name, Json arguments = json::object{});
   Json resources();
@@ -193,6 +238,10 @@ public:
   Json prompts();
   Json get_prompt(const std::string& name, Json arguments = json::object{});
   Json resource_templates();
+  void enable_tasks();
+  Json get_task(const std::string& task_id);
+  Json update_task(const std::string& task_id, Json input_responses);
+  Json cancel_task(const std::string& task_id);
   Json complete(Json ref, std::string argument_name, std::string value,
                 Json context = json::object{});
   Json list_all(const std::string& method, const std::string& array_field);

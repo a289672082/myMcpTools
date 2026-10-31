@@ -17,11 +17,12 @@ int main() {
   REQUIRE(call.at("resultType") == "complete");
   REQUIRE(call.at("content").as_array()[0].at("text") == "5");
   REQUIRE(client.read("test://one").at("contents").as_array()[0].at("text") == "value");
-  auto bad = client.call("add", {{"a", "bad"}, {"b", 3}});
-  REQUIRE(bad.at("isError") == true);
+  try { client.call("add", {{"a", "bad"}, {"b", 3}}); REQUIRE(false); }
+  catch (const Error& e) { REQUIRE(e.code == -32602); }
   Json invalid = {{"jsonrpc", "2.0"}, {"id", 88}, {"method", "tools/list"},
                   {"params", {{"_meta", {{"io.modelcontextprotocol/protocolVersion", "2099-01-01"},
-                                          {"io.modelcontextprotocol/clientCapabilities", json::object{}}}}}}};
+                                          {"io.modelcontextprotocol/clientCapabilities", json::object{}},
+                                          {"io.modelcontextprotocol/clientInfo", {{"name", "test"}, {"version", "1"}}}}}}}};
   REQUIRE(server.handle(invalid).at("error").at("code") == -32022);
   // Legacy stdio era: initialize and notifications/initialized, without modern _meta.
   Server legacy_server("legacy-test", "1.0");
@@ -37,7 +38,8 @@ int main() {
   // HTTP modern discovery must not advertise legacy versions.
   Json modern_req = {{"jsonrpc", "2.0"}, {"id", 19}, {"method", "server/discover"},
                      {"params", {{"_meta", {{"io.modelcontextprotocol/protocolVersion", ProtocolVersion},
-                                            {"io.modelcontextprotocol/clientCapabilities", json::object{}}}}}}};
+                                            {"io.modelcontextprotocol/clientCapabilities", json::object{}},
+                                          {"io.modelcontextprotocol/clientInfo", {{"name", "test"}, {"version", "1"}}}}}}}};
   REQUIRE(server.handle(modern_req, false).at("result").at("supportedVersions").as_array().size() == 1);
   // MRTR: callback supplies an elicitation answer; client retries with requestState.
   Server mrtr("mrtr-server");

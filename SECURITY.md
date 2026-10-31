@@ -1,10 +1,13 @@
-# Security notice
+# Security and production limits
 
-This project is an experimental MCP 2026-07-28 SDK, **not production hardened**.
+**Do not expose the built-in HTTP listener to the public Internet.** It binds to loopback deliberately. This code is an experimental MCP SDK, not an audited security boundary and not a fully conformant MCP implementation.
 
-- Built-in HTTP is **loopback-only**. No authentication or HTTPS is provided; do not publicly expose it or forward it without a properly configured, authenticated TLS gateway.
-- Tools execute your application code with the server process's privileges. Treat all tool input as untrusted. Validate business rules and authorize access independently of the SDK.
-- `x-mcp-header` is checked for equality with declared JSON arguments. Do not use untrusted annotations for authentication/authorization decisions.
-- Client-controlled URI inputs must not be mapped directly to unrestricted filesystem paths. URI template helpers are not a sandbox.
-- Never trust tool annotations, extension metadata, subscription messages or MRTR input without validating their source and meaning.
-- A full JSON Schema engine, modern OAuth resource server, timeouts and rate limiting are not implemented. Deploy with restrictive controls and test with official conformance tools first.
+- `Server::protect_http` adds protected-resource metadata, a Bearer challenge and a token validation callback. **Your verifier must authenticate tokens cryptographically or through trusted introspection and verify issuer, audience/resource, expiry and per-operation scopes.** A token string comparison is used solely in the demo/test mode and is not OAuth 2.1 validation.
+- For remote deployments place the service behind a correctly configured HTTPS authentication/authorization gateway. Check whether the gateway forwards authenticated identity securely and rejects unauthenticated traffic.
+- HTTPS client connections validate certificates and hostnames using the OS/OpenSSL trust store. Never bypass verification in production.
+- `oauth::begin` creates PKCE S256 and CSRF state. `oauth::validate_callback` checks state and issuer before token exchange. The application still must securely discover and validate AS metadata, manage registration, store tokens by issuer, exchange/refresh tokens and handle scope step-up.
+- In-memory Tasks IDs have CSPRNG entropy and expire by TTL, but no crash recovery, owner-specific isolation or persisted authorization. Do not use the task registry in a multi-tenant deployment without identity-based isolation and durable storage.
+- `validate_schema` is a **subset** of JSON Schema 2020-12. Unsupported assertions are not enforced. Always validate business rules within tools and do not rely on this validator as a security boundary.
+- stdio tools can check cooperative `Server::is_cancelled()` and report progress. Arbitrary blocking callbacks cannot be preempted safely.
+- Rate limiting, comprehensive request timeouts, server resource quotas, HTTP SSE disconnect cancellation, native TLS hosting and cross-SDK conformance are not implemented.
+- Tool prompts, URI templates, extensions, and tool annotations should be treated as untrusted application input. Limit filesystem and system privileges.

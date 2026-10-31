@@ -120,3 +120,30 @@ For stdio/HTTP subscriptions, event producers call `server.publish("notification
 - [Discovery](https://modelcontextprotocol.io/specification/2026-07-28/server/discover)
 - [Streamable HTTP](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)
 - [Tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools)
+
+## Expanded APIs (October 2026)
+
+Tasks are opt-in and are advertised to clients explicitly:
+
+```cpp
+server.enable_tasks();
+server.add_task_tool("background", "Long-running work", {{"type", "object"}},
+    [](const mymcp::Json& responses, std::atomic_bool& cancelled) -> mymcp::Json {
+      if (cancelled) return {{"content", mymcp::json::array{}}};
+      return mymcp::detail::make_tool_result("finished");
+    });
+
+mymcp::Client client = mymcp::Client::process("./my_server");
+client.enable_tasks(); // must be called before discover()
+auto handle = client.call("background");
+auto state = client.get_task(std::string(handle.at("taskId").as_string()));
+// client.update_task(taskId, inputResponses);  client.cancel_task(taskId);
+```
+
+The server task registry is process-local, **not durable across restarts**. HTTP tasks calls also validate the `Mcp-Name` header against `taskId`.
+
+A stdio server may report progress from inside an active tool handler using `server.progress(value, total, "message")`, and honor cancellation using `server.is_cancelled()`; the client can use `request_with_progress` and a `Client::process` notification callback. HTTP request-scoped progress is not yet implemented.
+
+For protected HTTP, `server.protect_http(protected_resource_metadata, token_verifier)` installs the metadata endpoint and authorization callback. The verifier must validate issuer, audience, expiry and required scopes. The example server's `--http-auth` is only a local integration test using the `MYMCP_TEST_TOKEN` environment variable. `Client::http("https://host/mcp", token)` validates TLS certificates/hostnames and includes a Bearer token. `mymcp/oauth.hpp` provides PKCE S256 and `state`/`iss` helpers for a host-managed OAuth authorization code flow; it does **not** implement automatic OAuth discovery, token exchange or refresh.
+
+All raw tool handlers are now checked against the supported JSON Schema assertion subset (see `include/mymcp/schema.hpp`). Schema violations return JSON-RPC `-32602`, not tool `isError`. Full JSON Schema 2020-12 validation and official conformance testing remain outstanding. See [COMPATIBILITY.md](COMPATIBILITY.md) and [SECURITY.md](SECURITY.md).

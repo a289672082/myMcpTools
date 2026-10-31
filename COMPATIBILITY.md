@@ -1,36 +1,37 @@
-# MCP 2026-07-28 conformance and implementation matrix
+# MCP 2026-07-28 compatibility matrix
 
-Verified as of October 31, 2026. **No claim of full protocol conformance.**
+Updated October 31, 2026. **An actively developed subset implementation, not a fully conformant SDK.** A green CTest result only certifies the tested local behavior, not official protocol conformance.
 
-| Protocol area | Status | Notes |
+| Protocol area | Current implementation | Remaining work |
 |---|---|---|
-| Core JSON-RPC request/response | Basic | Some request IDs, notification behaviors and edge cases remain untested |
-| Modern stateless metadata and discovery | Implemented | `server/discover`, protocol version, identity/capabilities, complete result |
-| Legacy 2025-11-25 stdio handshake | Basic | Automatic client fallback; HTTP legacy unsupported |
-| Tools | Basic | Synchronous typed/simple or raw handlers, listing/calling; no full schema validation |
-| Resources | Partial | URI + simple template matching, text resources; no RFC6570 full expansion |
-| Prompts | Basic | Text helper, raw rich messages, prompt argument descriptors |
-| Completion | Basic | Callback, max 100 values, basic validation |
-| Pagination | Implemented for in-memory lists | Stable map sort and per-method cursor; not snapshot-isolated |
-| Cache hints | Implemented | `ttlMs` and `cacheScope` on six standard cacheable operations, including discovery |
-| MRTR | Partial | `input_required`, `requestState`, callback retry and valid-operation guard; limited validation |
-| HTTP Streamable | Partial | POST JSON and `subscriptions/listen` SSE; no native TLS/remote deployment, legacy sessions, response-scoped SSE from custom tools |
-| stdio | Partial | Per-line requests, subscription ack/cancel; synchronous client cannot consume unsolicited events |
-| Subscriptions | Partial | ACK, filters, event publication, HTTP SSE, stdio cancel; no graceful server-initiated close API |
-| Notifications: progress/logging | Not implemented | Request-scoped notification transport remains absent |
-| Cancellation | Partial | Stdio subscription cancellation; no general cancellable work |
-| OAuth 2.1 | Not implemented | No CIMD/PKCE/issuer/metadata/scope/audience validation |
-| Full JSON Schema 2020-12 | Not implemented | Typed parameter decoding only |
-| TLS | Not implemented | HTTP restricted to loopback; use TLS/identity-enforcing reverse proxy |
-| Extensions | API only | Advertise namespaced extension capability, custom method handlers; no Tasks/Apps/EMA implementation |
-| Official SDK interop | Not verified | Need TypeScript v2/Kotlin/C# cross-tests and conformance suite |
+| Core JSON-RPC | Request IDs, errors, typed tools, basic notifications | Strict wire-schema testing and malformed packet fuzzing |
+| Stateless modern lifecycle | `server/discover`, required version + client identity/capabilities in request `_meta`, server response metadata, `resultType` | Official conformance tests and interoperability with TS v2/Kotlin/C# |
+| Legacy 2025-11-25 | stdio `initialize` fallback | Legacy HTTP sessions / SSE, version-specific behavior parity |
+| Tools | Typed registration, input JSON Schema assertion subset, context tools, async task tools, HTTP header annotations | Complete JSON Schema 2020-12 engine (e.g. remote refs, unevaluatedProperties); structured outputs/outputSchema validation; icons and annotations |
+| Resources | Plain text resources, basic URI template variables, update notification | Binary resources and full RFC6570 URI templates |
+| Prompts/completions | Rich prompt callback, arguments, completion callback | Schema validation and comprehensive field coverage |
+| List pagination/cache | Deterministic in-memory pagination, `ttlMs`, `cacheScope`; authenticated HTTP forces private scope | Snapshot cursors and cache revalidation |
+| MRTR | Basic `input_required` and retry with requestState | Full validation of sampling/elicitation, state security, all behaviors |
+| Tasks extension | Opt-in capability gate, cryptographic task IDs, poll, input-required/update, cooperative cancel, TTL expiry, HTTP routing headers | Durable persistence across restart; `taskIds` subscriptions/`notifications/tasks`; external task backend; interoperable conformance |
+| Request progress/cancellation | Concurrent stdio work, `notifications/progress` with monotonically increasing values, cooperative cancellation; sync client callback | HTTP response-scoped progress SSE and disconnect cancellation, configurable timeouts, robust stdio streaming API |
+| Subscriptions | Explicit `subscriptions/listen`, acknowledge, filters, HTTP SSE, stdio cancellation | Task status subscriptions, reconnect/resume, graceful close API integration |
+| HTTP transport | 2026 header validation, 4MiB request limit, loopback listener, metadata and bearer verification callback | Network-facing native HTTPS server, authenticated reverse proxy deployment guides, load/DoS tuning, legacy HTTP sessions |
+| HTTPS client | TLS with peer/hostname verification (OpenSSL), configurable Bearer token | HTTPS SSE subscription path, timeouts/retries/cert pinning options |
+| OAuth resource server | RFC9728-style metadata endpoint + bearer challenge; caller-supplied callback for token validation (MUST validate token/scope/audience/issuer) | Built-in JWT validation/JWKS discovery, OAuth scope step-up, authorization server interoperability |
+| OAuth client | PKCE S256/nonce/state helpers, RFC9207 issuer callback checks | Automatic PRM/AS discovery, CIMD/pre-registration/DCR, token exchange/refresh/storage and scope accumulation |
+| Extensions | Namespaced capability advertising + custom method registry; Tasks subset | Apps, non-core extensions, full negotiation and independent extension conformance |
+| Official conformance | Nine local CTest groups (Linux/GCC) | Official conformance suite, TS v2/Kotlin integration, CI across OSes |
 
-## Security warning
+## Build and test
 
-DO NOT expose this SDK's built-in HTTP listener over a public network. It has no token authentication, authorization, native HTTPS, workload isolation, quotas or DoS protection. The listener intentionally refuses non-loopback bind addresses. Reverse proxies must enforce authentication and TLS before production deployment; that architecture still requires security review.
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
 
-## Local tests
+Dependencies: C++20, Boost.Asio/Beast/Process/JSON headers and OpenSSL (SSL and Crypto).
 
-`cmake -S . -B build && cmake --build build && ctest --test-dir build --output-on-failure`
+## Security and scope notes
 
-Tests: basic protocol, advanced resource/pagination/completion/MRTR/subscription behavior, HTTP headers and errors, stdio cancellation and SSE interoperability between this C++ client and server.
+This repository must not be advertised as full MCP 2026-07-28 compatible. OAuth has **partial** implementation: a token verification callback is an integration hook, not a substitute for a trusted JWT/introspection verifier. The built-in HTTP listener binds only to loopback; a production resource server needs an authenticated TLS gateway and a security review. Long-running tasks are in-memory only, with finite retention and no cross-process durability.

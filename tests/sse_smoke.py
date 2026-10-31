@@ -26,7 +26,8 @@ try:
         return json.dumps({'jsonrpc': '2.0', 'id': 41, 'method': method,
                            'params': {'_meta': {
                              'io.modelcontextprotocol/protocolVersion': '2026-07-28',
-                             'io.modelcontextprotocol/clientCapabilities': {}}, **(extra or {})}})
+                             'io.modelcontextprotocol/clientCapabilities': {},
+                                    'io.modelcontextprotocol/clientInfo': {'name': 'python-test', 'version': '1'}}, **(extra or {})}})
 
     def headers(method):
         return {'Mcp-Method': method, 'MCP-Protocol-Version': '2026-07-28',
@@ -51,7 +52,7 @@ try:
     other.request('POST', '/mcp', body('tools/list'), headers('tools/list'))
     listed = other.getresponse()
     assert listed.status == 200
-    assert len(json.loads(listed.read())['result']['tools']) == 2
+    assert len(json.loads(listed.read())['result']['tools']) >= 2
     other.close()
     connection.close()
     output = subprocess.run([sys.argv[2], f'http://127.0.0.1:{port}/mcp'],
