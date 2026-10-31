@@ -51,7 +51,7 @@ std::string str(const Json& p, std::string_view key, std::string fallback = "") 
   if (!p.at(std::string(key)).is_string()) bad("参数必须为字符串: " + std::string(key));
   return p.at(std::string(key)).as_string();
 }
-bool boolean(const Json& p, std::string_view key, bool fallback = false) {
+bool bool_arg(const Json& p, std::string_view key, bool fallback = false) {
   if (!p.contains(std::string(key))) return fallback;
   if (!p.at(std::string(key)).is_bool()) bad("参数必须为布尔值: " + std::string(key));
   return p.at(std::string(key)).as_bool();
@@ -344,7 +344,7 @@ int run_agent_tools_demo() {
       schema({{"path","string"},{"content","string"},{"overwrite","boolean"}},{"path","content"}),
       [&](const Json& a) -> Json {
         const auto path=ws.path(str(a,"path"));
-        if(fs::exists(path)&&!boolean(a,"overwrite"))bad("文件已存在，覆盖需要 overwrite=true");
+        if(fs::exists(path)&&!bool_arg(a,"overwrite"))bad("文件已存在，覆盖需要 overwrite=true");
         const auto content=str(a,"content");write_limited(path,content);
         return object{{"path",ws.relative(path)},{"bytesWritten",content.size()}};
       });
@@ -474,7 +474,7 @@ int run_agent_tools_demo() {
       });
     reg("run_build","只编译 Demo 自动生成并校验过的无害 CMake 样例项目",
       schema({{"confirm","boolean"}},{"confirm"}),[&](const Json& a) -> Json {
-        if(!boolean(a,"confirm"))bad("编译前必须显式传入 confirm=true 并得到用户授权");
+        if(!bool_arg(a,"confirm"))bad("编译前必须显式传入 confirm=true 并得到用户授权");
         const auto sample=ws.path("agent_build_sample");
         if(!fs::exists(sample))fs::create_directories(sample);
         constexpr const char* cmake="cmake_minimum_required(VERSION 3.20)\nproject(agent_demo LANGUAGES CXX)\nadd_executable(agent_demo main.cpp)\n";
