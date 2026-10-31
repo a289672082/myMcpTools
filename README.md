@@ -43,7 +43,7 @@ auto client = mymcp::Client::http("http://127.0.0.1:3000/mcp");
 
 ## Build
 
-Requirements: C++20, CMake >= 3.20, Boost >= 1.83 (headers, incl. JSON/Beast/Asio/Process), Threads. Boost.JSON is compiled using its `src.hpp` header; a separate Boost JSON library is not required.
+Requirements (migration): C++20, CMake >= 3.20, OpenSSL, Threads, and a network connection for CMake to fetch pinned cpp-httplib and jsoncons sources. No Boost dependency.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
@@ -147,3 +147,35 @@ A stdio server may report progress from inside an active tool handler using `ser
 For protected HTTP, `server.protect_http(protected_resource_metadata, token_verifier)` installs the metadata endpoint and authorization callback. The verifier must validate issuer, audience, expiry and required scopes. The example server's `--http-auth` is only a local integration test using the `MYMCP_TEST_TOKEN` environment variable. `Client::http("https://host/mcp", token)` validates TLS certificates/hostnames and includes a Bearer token. `mymcp/oauth.hpp` provides PKCE S256 and `state`/`iss` helpers for a host-managed OAuth authorization code flow; it does **not** implement automatic OAuth discovery, token exchange or refresh.
 
 All raw tool handlers are now checked against the supported JSON Schema assertion subset (see `include/mymcp/schema.hpp`). Schema violations return JSON-RPC `-32602`, not tool `isError`. Full JSON Schema 2020-12 validation and official conformance testing remain outstanding. See [COMPATIBILITY.md](COMPATIBILITY.md) and [SECURITY.md](SECURITY.md).
+
+## Dependency migration (C++20 / cpp-httplib / jsoncons)
+
+This experimental migration removes Boost headers/libraries from the SDK. CMake fetches
+pinned `cpp-httplib` and `jsoncons` revisions at configuration time (network access required
+on first configure); OpenSSL remains required for TLS and PKCE. JSON values are
+`mymcp::Json` (`jsoncons::json`), so callers directly using `boost::json::value`
+need to update their source. CMake package exporting vendored dependencies is still being refined.
+
+OAuth client-side interface:
+
+```cpp
+#include "mymcp/mcp.hpp"
+#include "mymcp/oauth_client.hpp"
+auto session = std::make_shared<mymcp::oauth::Session>("https://mcp.example/mcp");
+session->discover();
+session->client_id("https://client.example/oauth-metadata.json");
+auto authorization = session->begin_authorization("http://127.0.0.1:8900/callback", {"tools:read"});
+// Open authorization.url in a browser, receive redirect code/state/iss through the app.
+session->exchange_code(authorization, code, returned_state, returned_issuer,
+                       "http://127.0.0.1:8900/callback");
+auto client = mymcp::Client::http_oauth("https://mcp.example/mcp", session);
+auto tools = client.tools();
+```
+
+The SDK does **not** host an OAuth Authorization Server or control the browser; OAuth
+redirect handling must be implemented by the application. Token validation on the
+server remains pluggable through `Server::protect_http(metadata, verifier)`, where
+`verifier` is responsible for cryptographically validating the credential and enforcing
+issuer, audience, expiration, subject and operation-level scopes.
+
+The migration must pass Linux + Windows CI before it is treated as a release.

@@ -35,3 +35,15 @@ Dependencies: C++20, Boost.Asio/Beast/Process/JSON headers and OpenSSL (SSL and 
 ## Security and scope notes
 
 This repository must not be advertised as full MCP 2026-07-28 compatible. OAuth has **partial** implementation: a token verification callback is an integration hook, not a substitute for a trusted JWT/introspection verifier. The built-in HTTP listener binds only to loopback; a production resource server needs an authenticated TLS gateway and a security review. Long-running tasks are in-memory only, with finite retention and no cross-process durability.
+
+## cpp-httplib / jsoncons migration workstream
+
+- Replaces Boost.Asio/Beast with cpp-httplib and Boost.Process with Windows/POSIX native process APIs.
+- Replaces Boost.JSON with jsoncons and compiles JSON Schema validation with jsoncons 2020-12.
+- Adds OAuth Session: protected-resource discovery, AS metadata discovery (RFC 8414 and OIDC),
+  authorization code + PKCE S256, callback state/issuer validation, token exchange, dynamic client
+  registration (when advertised), and refresh; clients can attach a Session using `Client::http_oauth`.
+- The OAuth server is a protected resource, not an authorization server; host apps supply a token
+  validator and the AS endpoints separately.
+- No CI conformance, native TLS hosting, durable Tasks, full SSE request streaming, or secure
+  automatic browser redirect receiver claims are made at this stage.

@@ -17,16 +17,16 @@ int main() {
   CHECK(error.find("/name") != std::string::npos);
   CHECK(!validate_schema(nested, {{"name", "Alpha"}, {"count", 7}}, &error));
   CHECK(!validate_schema(nested, {{"name", "Alpha"}, {"count", 3}, {"extra", 2}}, &error));
-  Json local_ref = {{"$defs", {{"small", {{"type", "integer"}, {"maximum", 3}}}}},
+  Json local_ref = json::object{{"$defs", {{"small", {{"type", "integer"}, {"maximum", 3}}}}},
                     {"$ref", "#/$defs/small"}};
   CHECK(validate_schema(local_ref, 2));
   CHECK(!validate_schema(local_ref, 10));
   Server srv("task-test");
   srv.enable_tasks();
-  srv.add_tool("schema", "Validate", nested, [](const json::object&) {
+  srv.add_tool("schema", "Validate", nested, [](const Json&) {
     return detail::make_tool_result("ok");
   });
-  srv.add_tool("background", "Run task", {{"type", "object"}}, [&](const json::object&) -> Json {
+  srv.add_tool("background", "Run task", {{"type", "object"}}, [&](const Json&) -> Json {
     return srv.start_task([](const Json& responses, std::atomic_bool& cancelled)->Json {
       if (cancelled.load()) return { {"content", json::array{}} };
       if (responses.is_null()) return {
@@ -53,7 +53,7 @@ int main() {
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
   CHECK(state.at("status") == "input_required");
-  CHECK(state.at("inputRequests").as_object().contains("confirm"));
+  CHECK(state.at("inputRequests").contains("confirm"));
   CHECK(cli.update_task(id, {{"not-known", "ignored"}}).at("resultType") == "complete");
   CHECK(cli.get_task(id).at("status") == "input_required");
   CHECK(cli.update_task(id, {{"confirm", {{"action", "accept"}, {"content", {{"ok", true}}}}}}).at("resultType") == "complete");
@@ -63,7 +63,7 @@ int main() {
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
   CHECK(state.at("status") == "completed");
-  CHECK(state.at("result").at("content").as_array()[0].at("text").is_string());
+  CHECK(state.at("result").at("content")[0].at("text").is_string());
   CHECK(cli.cancel_task(id).at("resultType") == "complete");
   Client no_tasks([&](const Json& req){return srv.handle(req);});
   try { no_tasks.request("tasks/get", {{"taskId",id}}); CHECK(false); }

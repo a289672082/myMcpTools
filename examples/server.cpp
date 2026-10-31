@@ -13,9 +13,9 @@ int main(int argc, char** argv) {
   server.tool("greet", "Say hello", [](std::string name) { return "Hello, " + name; },
               arg<std::string>("name", "Person's name"));
   server.resource("demo://status", "Status", [] { return std::string("healthy"); });
-  server.prompt("welcome", "A welcome prompt", [](const mymcp::json::object&) { return "Welcome to the MCP server."; });
+  server.prompt("welcome", "A welcome prompt", [](const mymcp::Json&) { return "Welcome to the MCP server."; });
   server.add_tool("count_with_progress", "Count while reporting progress", {{"type", "object"}},
-     [&server](const json::object&) -> Json {
+     [&server](const Json&) -> Json {
        for (int i = 1; i <= 50; ++i) {
          if (server.is_cancelled()) break;
          server.progress(i, 50, "Counting");

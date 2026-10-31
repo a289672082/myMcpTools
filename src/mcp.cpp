@@ -1,14 +1,21 @@
 #include "mymcp/mcp.hpp"
 #include "mymcp/schema.hpp"
+#include "mymcp/oauth_client.hpp"
 #include <openssl/rand.h>
 #include <openssl/ssl.h>
 #include <ctime>
 #include <cmath>
-#include <boost/asio.hpp>
-#include <boost/beast.hpp>
-#include <boost/beast/ssl.hpp>
-#include <boost/asio/ssl.hpp>
-#include <boost/process.hpp>
+#include <httplib.h>
+#include <cstdio>
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+#include <fcntl.h>
+#else
+#include <unistd.h>
+#include <sys/wait.h>
+#include <signal.h>
+#endif
 #include <algorithm>
 #include <cctype>
 #include <iostream>
@@ -22,34 +29,29 @@
 #include <cstdint>
 
 namespace mymcp {
-namespace asio = boost::asio;
-namespace beast = boost::beast;
-namespace http = beast::http;
-namespace bp = boost::process;
-using tcp = asio::ip::tcp;
 
 namespace {
 const Json null_json = nullptr;
-const Json& find(const Json& object, boost::json::string_view key) {
+const Json& find(const Json& object, std::string_view key) {
   if (!object.is_object()) return null_json;
-  if (const auto* p = object.as_object().if_contains(key)) return *p;
+  if (const auto* p = json::if_contains(object, key)) return *p;
   return null_json;
 }
-std::string string_of(const Json& obj, boost::json::string_view key, std::string fallback = {}) {
+std::string string_of(const Json& obj, std::string_view key, std::string fallback = {}) {
   const auto& v = find(obj, key);
   return v.is_string() ? std::string(v.as_string()) : fallback;
 }
 Json rpc_error(Json id, int code, std::string message, Json data = nullptr) {
   json::object e{{"code", code}, {"message", std::move(message)}};
   if (!data.is_null()) e["data"] = std::move(data);
-  return {{"jsonrpc", "2.0"}, {"id", std::move(id)}, {"error", std::move(e)}};
+  return json::object{{"jsonrpc", "2.0"}, {"id", std::move(id)}, {"error", std::move(e)}};
 }
 Json rpc_success(Json id, Json result) {
-  return {{"jsonrpc", "2.0"}, {"id", std::move(id)}, {"result", std::move(result)}};
+  return json::object{{"jsonrpc", "2.0"}, {"id", std::move(id)}, {"result", std::move(result)}};
 }
 Json complete(Json value, bool modern) {
-  if (modern && value.is_object() && !value.as_object().contains("resultType"))
-    value.as_object()["resultType"] = "complete";
+  if (modern && value.is_object() && !value.contains("resultType"))
+    value["resultType"] = "complete";
   return value;
 }
 std::string ascii_lower(std::string s) {
@@ -119,7 +121,7 @@ void extract_header_fields(const Json& schema, std::vector<std::string> path,
     out.push_back({"Mcp-Param-" + name, path, type});
   }
   const auto& properties = find(schema, "properties");
-  if (properties.is_object()) for (const auto& [name, child] : properties.as_object()) {
+  if (properties.is_object()) for (const auto& entry : properties.object_range()) { const auto name = entry.key(); const auto& child = entry.value();
     auto p = path;
     p.emplace_back(name);
     extract_header_fields(child, std::move(p), out);
@@ -142,14 +144,14 @@ std::string header_value(const Json& v) {
   if (v.is_string()) return std::string(v.as_string());
   if (v.is_bool()) return v.as_bool() ? "true" : "false";
   if (v.is_int64()) {
-    if (v.as_int64() < -9007199254740991LL || v.as_int64() > 9007199254740991LL)
+    if (v.as_integer<std::int64_t>() < -9007199254740991LL || v.as_integer<std::int64_t>() > 9007199254740991LL)
       throw Error(-32602, "HTTP mirrored integers must be IEEE754 safe integers");
-    return std::to_string(v.as_int64());
+    return std::to_string(v.as_integer<std::int64_t>());
   }
   if (v.is_uint64()) {
-    if (v.as_uint64() > 9007199254740991ULL)
+    if (v.as_integer<std::uint64_t>() > 9007199254740991ULL)
       throw Error(-32602, "HTTP mirrored integers must be IEEE754 safe integers");
-    return std::to_string(v.as_uint64());
+    return std::to_string(v.as_integer<std::uint64_t>());
   }
   throw Error(-32602, "Invalid HTTP mirrored parameter value");
 }
@@ -177,7 +179,7 @@ void paginate_list(json::array& values, const Json& params, Json& result,
   const std::size_t end = offset + std::min(page_size, total - offset);
   for (auto i = offset; i < end; ++i) page.push_back(values[i]);
   values = std::move(page);
-  if (end < total) result.as_object()["nextCursor"] = method + ":" + std::to_string(end);
+  if (end < total) result["nextCursor"] = method + ":" + std::to_string(end);
 }
 // Simple RFC6570 level-1 URI templates: {variable}. No unsafe partial match.
 std::optional<json::object> template_match(std::string_view pattern, std::string_view uri) {
@@ -211,11 +213,11 @@ std::optional<json::object> template_match(std::string_view pattern, std::string
 
 namespace detail {
 Json make_tool_result(const Json& v) {
-  return {{"content", json::array{{{"type", "text"}, {"text", json::serialize(v)}}}},
+  return json::object{{"content", json::array{json::object{{"type", "text"}, {"text", json::serialize(v)}}}},
           {"structuredContent", v}, {"isError", false}};
 }
 Json make_tool_result(const std::string& s) {
-  return {{"content", json::array{{{"type", "text"}, {"text", s}}}}, {"isError", false}};
+  return json::object{{"content", json::array{json::object{{"type", "text"}, {"text", s}}}}, {"isError", false}};
 }
 Json make_tool_result(const char* s) { return make_tool_result(std::string(s)); }
 Json make_tool_result(bool v) { return make_tool_result(v ? "true" : "false"); }
@@ -241,7 +243,7 @@ void Server::add_task_tool(std::string name, std::string description, Json schem
   if (!handler) throw std::invalid_argument("Invalid task handler");
   const std::string key = name;
   add_tool(std::move(name), std::move(description), std::move(schema),
-    [this, job = std::move(handler)](const json::object&) -> Json {
+    [this, job = std::move(handler)](const Json&) -> Json {
       return start_task(job);
     });
   tools_.at(key).requires_tasks = true;
@@ -250,12 +252,12 @@ void Server::resource(std::string uri, std::string name, std::function<std::stri
   if (!resources_.emplace(uri, Resource{std::move(name), std::move(mime), std::move(reader)}).second)
     throw std::invalid_argument("Duplicate resource: " + uri);
 }
-void Server::prompt(std::string name, std::string description, std::function<std::string(const json::object&)> reader) {
+void Server::prompt(std::string name, std::string description, std::function<std::string(const Json&)> reader) {
   if (!prompts_.emplace(name, Prompt{std::move(description), std::move(reader), {}, json::array{}}).second)
     throw std::invalid_argument("Duplicate prompt: " + name);
 }
 void Server::resource_template(std::string uri_template, std::string name,
-                               std::function<Json(const std::string&, const json::object&)> reader,
+                               std::function<Json(const std::string&, const Json&)> reader,
                                std::string mime, std::string description) {
   if (!reader || uri_template.empty()) throw std::invalid_argument("Invalid resource template");
   if (!templates_.emplace(uri_template, ResourceTemplate{std::move(name), std::move(mime),
@@ -263,17 +265,17 @@ void Server::resource_template(std::string uri_template, std::string name,
     throw std::invalid_argument("Duplicate resource template");
 }
 void Server::prompt_full(std::string name, std::string description,
-                         std::function<Json(const json::object&)> handler, Json arguments) {
+                         std::function<Json(const Json&)> handler, Json arguments) {
   if (!handler || !arguments.is_array()) throw std::invalid_argument("Invalid prompt");
   if (!prompts_.emplace(name, Prompt{std::move(description), {}, std::move(handler),
                                      std::move(arguments)}).second)
     throw std::invalid_argument("Duplicate prompt");
 }
-void Server::completion(std::function<Json(const json::object&)> handler) {
+void Server::completion(std::function<Json(const Json&)> handler) {
   if (!handler) throw std::invalid_argument("Invalid completion handler");
   completion_ = std::move(handler);
 }
-void Server::method(std::string name, std::function<Json(const json::object&)> handler) {
+void Server::method(std::string name, std::function<Json(const Json&)> handler) {
   if (!handler || name.empty() || !methods_.emplace(name, std::move(handler)).second)
     throw std::invalid_argument("Duplicate or invalid method");
 }
@@ -308,12 +310,12 @@ std::shared_ptr<Server::Subscription> Server::subscribe(Json id, Json filter) {
   if (!(id.is_string() || id.is_int64() || id.is_uint64()) || !filter.is_object())
     throw Error(-32602, "Invalid subscription ID/filter");
   json::object accepted;
-  for (const auto& [name, value] : filter.as_object()) {
+  for (const auto& entry : filter.object_range()) { const auto name = entry.key(); const auto& value = entry.value();
     const std::string key(name);
     if (key == "resourceSubscriptions") {
       if (!value.is_array()) throw Error(-32602, "resourceSubscriptions must be an array");
       json::array resources;
-      for (const auto& uri : value.as_array()) {
+      for (const auto& uri : value.array_range()) {
         if (!uri.is_string()) throw Error(-32602, "Resource subscription URI must be string");
         if (resources.size() > 10000) throw Error(-32602, "Too many subscriptions");
         resources.push_back(uri);
@@ -357,12 +359,12 @@ void Server::publish(const std::string& method, Json params) {
     ++it;
     const Json& allowed = find(sub->notifications, filter);
     bool selected = allowed.is_bool() && allowed.as_bool();
-    if (allowed.is_array()) for (const auto& entry : allowed.as_array())
+    if (allowed.is_array()) for (const auto& entry : allowed.array_range())
       if (entry.is_string() && entry.as_string() == uri) selected = true;
     if (!selected) continue;
     Json payload = params;
-    payload.as_object()["_meta"] = {{"io.modelcontextprotocol/subscriptionId", sub->id}};
-    Json event = {{"jsonrpc", "2.0"}, {"method", method}, {"params", std::move(payload)}};
+    payload["_meta"] = {{"io.modelcontextprotocol/subscriptionId", sub->id}};
+    Json event = json::object{{"jsonrpc", "2.0"}, {"method", method}, {"params", std::move(payload)}};
     {
       std::lock_guard stream_lock(sub->mutex);
       if (!sub->closed && sub->messages.size() < 4096) sub->messages.push_back(std::move(event));
@@ -405,34 +407,34 @@ void Server::run_task(const std::shared_ptr<TaskState>& task, Json input_respons
       answer = task->handler(input_responses, task->cancel_requested);
       std::lock_guard lock(task->mutex);
       if (task->details.at("status") == "cancelled") return;
-      task->details.as_object()["lastUpdatedAt"] = utc_now();
+      task->details["lastUpdatedAt"] = utc_now();
       if (!task->cancel_requested.load() && answer.is_object() &&
-          answer.as_object().if_contains("resultType") && answer.at("resultType") == "input_required") {
+          json::if_contains(answer, "resultType") && answer.at("resultType") == "input_required") {
         const Json& items = answer.at("inputRequests");
-        if (!items.is_object() || items.as_object().empty()) throw Error(-32603, "Invalid task input requests");
-        for (const auto& [key, item] : items.as_object()) {
+        if (!items.is_object() || items.empty()) throw Error(-32603, "Invalid task input requests");
+        for (const auto& entry : items.object_range()) { const auto key = entry.key(); const auto& item = entry.value();
           if (task->used_input_ids.count(std::string(key))) throw Error(-32603, "Task input ID reused");
           if (!item.is_object()) throw Error(-32603, "Invalid input request");
           task->used_input_ids.insert(std::string(key));
         }
-        task->details.as_object()["status"] = "input_required";
-        task->details.as_object()["inputRequests"] = items;
+        task->details["status"] = "input_required";
+        task->details["inputRequests"] = items;
       } else if (task->cancel_requested.load()) {
-        task->details.as_object()["status"] = "cancelled";
+        task->details["status"] = "cancelled";
       } else if (answer.is_object()) {
-        task->details.as_object()["status"] = "completed";
-        task->details.as_object()["result"] = std::move(answer);
+        task->details["status"] = "completed";
+        task->details["result"] = std::move(answer);
       } else throw Error(-32603, "Task handler must return a JSON object");
     } catch (const Error& error) {
       std::lock_guard lock(task->mutex);
-      task->details.as_object()["status"] = "failed";
-      task->details.as_object()["error"] = {{"code", error.code}, {"message", error.what()}};
-      task->details.as_object()["lastUpdatedAt"] = utc_now();
+      task->details["status"] = "failed";
+      task->details["error"] = {{"code", error.code}, {"message", error.what()}};
+      task->details["lastUpdatedAt"] = utc_now();
     } catch (const std::exception& error) {
       std::lock_guard lock(task->mutex);
-      task->details.as_object()["status"] = "failed";
-      task->details.as_object()["error"] = {{"code", -32603}, {"message", error.what()}};
-      task->details.as_object()["lastUpdatedAt"] = utc_now();
+      task->details["status"] = "failed";
+      task->details["error"] = {{"code", -32603}, {"message", error.what()}};
+      task->details["lastUpdatedAt"] = utc_now();
     }
   }).detach();
 }
@@ -463,7 +465,7 @@ Json Server::start_task(TaskHandler handler, std::uint64_t ttl_ms, std::uint64_t
   }
   Json result = task->details;
   run_task(task, nullptr);
-  result.as_object()["resultType"] = "task";
+  result["resultType"] = "task";
   return result;
 }
 
@@ -481,7 +483,7 @@ Json Server::task_state(const std::string& id) {
   }
   std::lock_guard lock(task->mutex);
   Json status = task->details;
-  status.as_object()["resultType"] = "complete";
+  status["resultType"] = "complete";
   return status;
 }
 
@@ -503,7 +505,7 @@ Json Server::handle(const Json& req, bool allow_legacy) {
   if (!req.is_object() || string_of(req, "jsonrpc") != "2.0" || !find(req, "method").is_string())
     return rpc_error(nullptr, -32600, "Invalid JSON-RPC request");
   const Json id = find(req, "id");
-  const bool notification = !req.as_object().contains("id");
+  const bool notification = !req.contains("id");
   if (!notification && !(id.is_string() || id.is_int64() || id.is_uint64()))
     return rpc_error(nullptr, -32600, "Invalid JSON-RPC ID");
   const std::string method = string_of(req, "method");
@@ -522,7 +524,7 @@ Json Server::handle(const Json& req, bool allow_legacy) {
       auto offered = string_of(params, "protocolVersion", LegacyProtocolVersion);
       if (offered != "2025-11-25" && offered != "2025-06-18" && offered != "2025-03-26")
         offered = LegacyProtocolVersion;
-      Json caps = {{"tools", json::object{}}, {"resources", json::object{}}, {"prompts", json::object{}}};
+      Json caps = json::object{{"tools", json::object{}}, {"resources", json::object{}}, {"prompts", json::object{}}};
       return rpc_success(id, {{"protocolVersion", offered}, {"capabilities", caps},
                               {"serverInfo", {{"name", name_}, {"version", version_}}}});
     }
@@ -547,14 +549,14 @@ Json Server::handle(const Json& req, bool allow_legacy) {
                                 {"prompts", json::object{}}};
       if (completion_) capabilities["completions"] = json::object{};
       if (!extensions_.empty()) capabilities["extensions"] = extensions_;
-      result = {{"supportedVersions", allow_legacy ? json::array{ProtocolVersion, LegacyProtocolVersion} : json::array{ProtocolVersion}},
+      result = json::object{{"supportedVersions", allow_legacy ? json::array{ProtocolVersion, LegacyProtocolVersion} : json::array{ProtocolVersion}},
                 {"capabilities", std::move(capabilities)}};
-      if (!instructions_.empty()) result.as_object()["instructions"] = instructions_;
+      if (!instructions_.empty()) result["instructions"] = instructions_;
     } else if (method == "tools/list") {
       json::array list;
       for (const auto& [name, tool] : tools_) list.push_back({{"name", name}, {"description", tool.description}, {"inputSchema", tool.schema}});
-      result = {{"tools", std::move(list)}};
-      paginate_list(result.as_object().at("tools").as_array(), params, result, method, page_size_);
+      result = json::object{{"tools", std::move(list)}};
+      paginate_list(result.at("tools"), params, result, method, page_size_);
     } else if (method == "tools/call") {
       const auto name = string_of(params, "name");
       const auto it = tools_.find(name);
@@ -571,10 +573,10 @@ Json Server::handle(const Json& req, bool allow_legacy) {
       if (!validate_schema(it->second.schema, actual_args, &schema_error))
         throw Error(-32602, "Tool inputSchema violation: " + schema_error);
       try {
-        result = it->second.handler(it->second.with_context ? params.as_object() :
-                                     (args.is_object() ? args.as_object() : json::object{}));
+        result = it->second.handler(it->second.with_context ? params :
+                                     (args.is_object() ? args : json::object{}));
       } catch (const std::exception& e) {
-        result = {{"content", json::array{{{"type", "text"}, {"text", e.what()}}}}, {"isError", true}};
+        result = json::object{{"content", json::array{json::object{{"type", "text"}, {"text", e.what()}}}}, {"isError", true}};
       }
       if (!result.is_object()) throw Error(-32603, "Invalid tool result");
     } else if (method == "tasks/get" || method == "tasks/update" || method == "tasks/cancel") {
@@ -603,9 +605,9 @@ Json Server::handle(const Json& req, bool allow_legacy) {
           {
             std::lock_guard lock(task->mutex);
             if (task->details.at("status") == "input_required") {
-              task->details.as_object()["status"] = "cancelled";
-              task->details.as_object().erase("inputRequests");
-              task->details.as_object()["lastUpdatedAt"] = utc_now();
+              task->details["status"] = "cancelled";
+              task->details.erase("inputRequests");
+              task->details["lastUpdatedAt"] = utc_now();
             }
           }
         } else {
@@ -616,8 +618,8 @@ Json Server::handle(const Json& req, bool allow_legacy) {
           {
             std::lock_guard lock(task->mutex);
             if (task->details.at("status") == "input_required") {
-              auto& outstanding = task->details.as_object().at("inputRequests").as_object();
-              for (const auto& [key, answer] : input.as_object()) {
+              auto& outstanding = task->details.at("inputRequests");
+              for (const auto& entry : input.object_range()) { const auto key = entry.key(); const auto& answer = entry.value();
                 if (outstanding.contains(key)) {
                   task->responses[std::string(key)] = answer;
                   outstanding.erase(key);
@@ -627,9 +629,9 @@ Json Server::handle(const Json& req, bool allow_legacy) {
                 resume = true;
                 answers = task->responses;
                 task->responses.clear();
-                task->details.as_object().erase("inputRequests");
-                task->details.as_object()["status"] = "working";
-                task->details.as_object()["lastUpdatedAt"] = utc_now();
+                task->details.erase("inputRequests");
+                task->details["status"] = "working";
+                task->details["lastUpdatedAt"] = utc_now();
               }
             }
           }
@@ -640,13 +642,13 @@ Json Server::handle(const Json& req, bool allow_legacy) {
     } else if (method == "resources/list") {
       json::array list;
       for (const auto& [uri, res] : resources_) list.push_back({{"uri", uri}, {"name", res.name}, {"mimeType", res.mime}});
-      result = {{"resources", std::move(list)}};
-      paginate_list(result.as_object().at("resources").as_array(), params, result, method, page_size_);
+      result = json::object{{"resources", std::move(list)}};
+      paginate_list(result.at("resources"), params, result, method, page_size_);
     } else if (method == "resources/read") {
       const auto uri = string_of(params, "uri");
       const auto it = resources_.find(uri);
       if (it != resources_.end()) {
-        result = {{"contents", json::array{{{"uri", uri}, {"mimeType", it->second.mime}, {"text", it->second.reader()}}}}};
+        result = json::object{{"contents", json::array{json::object{{"uri", uri}, {"mimeType", it->second.mime}, {"text", it->second.reader()}}}}};
       } else {
         bool matched = false;
         for (const auto& [pattern, entry] : templates_) {
@@ -661,40 +663,40 @@ Json Server::handle(const Json& req, bool allow_legacy) {
     } else if (method == "resources/templates/list") {
       json::array list;
       for (const auto& [uri, t] : templates_) {
-        Json entry = {{"uriTemplate", uri}, {"name", t.name}, {"mimeType", t.mime}};
-        if (!t.description.empty()) entry.as_object()["description"] = t.description;
+        Json entry = json::object{{"uriTemplate", uri}, {"name", t.name}, {"mimeType", t.mime}};
+        if (!t.description.empty()) entry["description"] = t.description;
         list.push_back(std::move(entry));
       }
-      result = {{"resourceTemplates", std::move(list)}};
-      paginate_list(result.as_object().at("resourceTemplates").as_array(), params, result, method, page_size_);
+      result = json::object{{"resourceTemplates", std::move(list)}};
+      paginate_list(result.at("resourceTemplates"), params, result, method, page_size_);
     } else if (method == "prompts/list") {
       json::array list;
       for (const auto& [name, prompt] : prompts_) {
-        Json desc = {{"name", name}, {"description", prompt.description}};
-        if (!prompt.arguments.as_array().empty()) desc.as_object()["arguments"] = prompt.arguments;
+        Json desc = json::object{{"name", name}, {"description", prompt.description}};
+        if (!prompt.arguments.empty()) desc["arguments"] = prompt.arguments;
         list.push_back(std::move(desc));
       }
-      result = {{"prompts", std::move(list)}};
-      paginate_list(result.as_object().at("prompts").as_array(), params, result, method, page_size_);
+      result = json::object{{"prompts", std::move(list)}};
+      paginate_list(result.at("prompts"), params, result, method, page_size_);
     } else if (method == "prompts/get") {
       const auto name = string_of(params, "name");
       const auto it = prompts_.find(name);
       if (it == prompts_.end()) throw Error(-32602, "Unknown prompt: " + name);
       const Json& args = find(params, "arguments");
-      const json::object values = args.is_object() ? args.as_object() : json::object{};
+      const json::object values = args.is_object() ? args : json::object{};
       if (it->second.full_reader) result = it->second.full_reader(values);
-      else result = {{"messages", json::array{{{"role", "user"}, {"content", {{"type", "text"}, {"text", it->second.reader(values)}}}}}}};
+      else result = json::object{{"messages", json::array{json::object{{"role", "user"}, {"content", {{"type", "text"}, {"text", it->second.reader(values)}}}}}}};
     } else if (method == "completion/complete" && completion_) {
       if (!params.is_object() || !find(params, "ref").is_object() || !find(params, "argument").is_object())
         throw Error(-32602, "Invalid completion request");
-      result = completion_(params.as_object());
+      result = completion_(params);
       if (!result.is_object() || !find(result, "completion").is_object() ||
           !find(find(result, "completion"), "values").is_array() ||
-          find(find(result, "completion"), "values").as_array().size() > 100)
+          find(find(result, "completion"), "values").size() > 100)
         throw Error(-32603, "Invalid completion result");
     } else if (auto registered = methods_.find(method); registered != methods_.end()) {
       if (!params.is_object()) throw Error(-32602, "Invalid method parameters");
-      result = registered->second(params.as_object());
+      result = registered->second(params);
     } else if (method == "ping" && !modern) {
       result = json::object{};
     } else {
@@ -712,7 +714,7 @@ Json Server::handle(const Json& req, bool allow_legacy) {
         throw Error(-32603, "input_required is not allowed for this method");
       const auto& requests = find(result, "inputRequests");
       if (!requests.is_null() && !requests.is_object()) throw Error(-32603, "Invalid inputRequests");
-      if (requests.is_object()) for (auto& [key, item] : requests.as_object()) {
+      if (requests.is_object()) for (auto& entry : requests.object_range()) { const auto key = entry.key(); auto& item = entry.value();
         const auto method_name = string_of(item, "method");
         if (method_name != "elicitation/create" && method_name != "sampling/createMessage" && method_name != "roots/list")
           throw Error(-32603, "Invalid input request type");
@@ -720,14 +722,14 @@ Json Server::handle(const Json& req, bool allow_legacy) {
     }
     result = complete(std::move(result), modern);
     if (modern) {
-      json::object meta_out = find(result, "_meta").is_object() ? find(result, "_meta").as_object() : json::object{};
+      json::object meta_out = find(result, "_meta").is_object() ? find(result, "_meta") : json::object{};
       meta_out["io.modelcontextprotocol/serverInfo"] = {{"name", name_}, {"version", version_}};
-      result.as_object()["_meta"] = std::move(meta_out);
+      result["_meta"] = std::move(meta_out);
       if (method == "server/discover" || method == "tools/list" || method == "prompts/list" ||
           method == "resources/list" || method == "resources/templates/list" || method == "resources/read") {
         if (find(result, "resultType") == "complete") {
-          result.as_object()["ttlMs"] = ttl_ms_;
-          result.as_object()["cacheScope"] = cache_scope_;
+          result["ttlMs"] = ttl_ms_;
+          result["cacheScope"] = cache_scope_;
         }
       }
     }
@@ -761,9 +763,9 @@ void Server::progress(double value, std::optional<double> total, std::string mes
     std::lock_guard lock(ctx->mutex);
     if (value <= ctx->last_progress) throw std::invalid_argument("Progress must increase");
     ctx->last_progress = value;
-    Json params = {{"progressToken", ctx->token}, {"progress", value}};
-    if (total) params.as_object()["total"] = *total;
-    if (!message.empty()) params.as_object()["message"] = std::move(message);
+    Json params = json::object{{"progressToken", ctx->token}, {"progress", value}};
+    if (total) params["total"] = *total;
+    if (!message.empty()) params["message"] = std::move(message);
     event = {{"jsonrpc", "2.0"}, {"method", "notifications/progress"}, {"params", std::move(params)}};
   }
   if (!ctx->cancelled.load()) ctx->emit(event);
@@ -797,7 +799,7 @@ void Server::run_stdio() {
       if (method == "subscriptions/listen") {
         Json checked = handle(request);
         const Json& error_code = find(find(checked, "error"), "code");
-        if (!error_code.is_int64() || error_code.as_int64() != -32601) {
+        if (!error_code.is_int64() || error_code.as_integer<std::int64_t>() != -32601) {
           if (!checked.is_null()) output(checked);
           continue;
         }
@@ -859,39 +861,33 @@ void Server::run_stdio() {
 }
 
 namespace {
-using Request = http::request<http::string_body>;
-using Response = http::response<http::string_body>;
-std::string header(const Request& request, const std::string& name) {
-  const auto it = request.find(name);
-  return it == request.end() ? "" : std::string(it->value());
+struct HttpReply {
+  int status = 200;
+  Json json_result = nullptr;
+  std::string challenge;
+};
+std::string header(const httplib::Request& request, const std::string& name) {
+  return request.has_header(name) ? request.get_header_value(name) : std::string{};
 }
-Response http_response(http::status status, const Json& payload, unsigned version = 11) {
-  Response response{status, version};
-  response.set(http::field::content_type, "application/json");
-  response.set(http::field::server, "myMcpTools");
-  response.keep_alive(false);
-  response.body() = json::serialize(payload);
-  response.prepare_payload();
-  return response;
-}
-Response on_http(Server& server, const Request& req, const std::string& bind_host, unsigned short port) {
+HttpReply on_http(Server& server, const httplib::Request& req,
+                  const std::string& bind_host, unsigned short port) {
   Json id = nullptr;
-  if (req.method() == http::verb::get && req.target() == "/.well-known/oauth-protected-resource" &&
-      server.http_requires_auth())
-    return http_response(http::status::ok, server.protected_resource_metadata(), req.version());
-  if (req.method() != http::verb::post || req.target() != "/mcp")
-    return http_response(http::status::not_found, rpc_error(id, -32601, "MCP endpoint is POST /mcp"), req.version());
+  if (req.path != "/mcp")
+    return {404, rpc_error(id, -32601, "MCP endpoint is POST /mcp"), {}};
   const auto origin = header(req, "Origin");
   if (!origin.empty() && origin != "http://" + bind_host + ":" + std::to_string(port) &&
-       !(bind_host == "127.0.0.1" && origin == "http://localhost:" + std::to_string(port)))
-    return http_response(http::status::forbidden, rpc_error(id, -32000, "Invalid Origin"), req.version());
+      !(bind_host == "127.0.0.1" && origin == "http://localhost:" + std::to_string(port)))
+    return {403, rpc_error(id, -32000, "Invalid Origin"), {}};
   const std::string accept = header(req, "Accept");
-  if (accept.find("application/json") == std::string::npos || accept.find("text/event-stream") == std::string::npos ||
+  if (accept.find("application/json") == std::string::npos ||
+      accept.find("text/event-stream") == std::string::npos ||
       header(req, "Content-Type").find("application/json") == std::string::npos)
-    return http_response(http::status::bad_request, rpc_error(id, -32600, "Invalid HTTP Content-Type or Accept"), req.version());
+    return {400, rpc_error(id, -32600, "Invalid HTTP Content-Type or Accept"), {}};
+  if (req.body.size() > 4 * 1024 * 1024)
+    return {413, rpc_error(id, -32600, "Request body too large"), {}};
   Json body;
-  try { body = json::parse(req.body()); }
-  catch (const std::exception&) { return http_response(http::status::bad_request, rpc_error(nullptr, -32700, "Parse error"), req.version()); }
+  try { body = json::parse(req.body); }
+  catch (const std::exception&) { return {400, rpc_error(nullptr, -32700, "Parse error"), {}}; }
   id = find(body, "id");
   const Json& params = find(body, "params");
   const Json& meta = find(params, "_meta");
@@ -902,345 +898,289 @@ Response on_http(Server& server, const Request& req, const std::string& bind_hos
     const std::string target = string_of(params, method == "resources/read" ? "uri" :
                                        method.starts_with("tasks/") ? "taskId" : "name");
     if (!server.verify_http(token, method, target)) {
-      Response denied = http_response(http::status::unauthorized,
-                           rpc_error(id, -32001, "Unauthorized"), req.version());
       const std::string resource = string_of(server.protected_resource_metadata(), "resource");
       const auto scheme_end = resource.find("://");
       const auto path_begin = scheme_end == std::string::npos ? std::string::npos :
                               resource.find('/', scheme_end + 3);
       const std::string base = resource.substr(0, path_begin);
-      denied.set(http::field::www_authenticate,
-                 "Bearer resource_metadata=\"" + base +
-                 "/.well-known/oauth-protected-resource\"");
-      return denied;
+      return {401, rpc_error(id, -32001, "Unauthorized"),
+              "Bearer resource_metadata=\"" + base + "/.well-known/oauth-protected-resource\""};
     }
   }
   const std::string ver = string_of(meta, "io.modelcontextprotocol/protocolVersion");
-  if (ver.empty() || header(req, "MCP-Protocol-Version") != ver || header(req, "Mcp-Method") != method)
-    return http_response(http::status::bad_request, rpc_error(id, -32020, "HeaderMismatch: version or method"), req.version());
+  if (ver.empty() || header(req, "MCP-Protocol-Version") != ver ||
+      header(req, "Mcp-Method") != method)
+    return {400, rpc_error(id, -32020, "HeaderMismatch: version or method"), {}};
   if (ver != ProtocolVersion)
-    return http_response(http::status::bad_request,
-      rpc_error(id, -32022, "Unsupported protocol version", {{"requested", ver}, {"supported", json::array{ProtocolVersion}}}), req.version());
+    return {400, rpc_error(id, -32022, "Unsupported protocol version",
+             { {"requested", ver}, {"supported", json::array{ProtocolVersion}} }), {}};
   if (method == "tools/call" || method == "resources/read" || method == "prompts/get" ||
       method == "tasks/get" || method == "tasks/update" || method == "tasks/cancel") {
     const std::string expected = string_of(params, method == "resources/read" ? "uri" :
                             method.starts_with("tasks/") ? "taskId" : "name");
     const auto decoded = decode_header(header(req, "Mcp-Name"));
     if (!decoded || *decoded != expected)
-      return http_response(http::status::bad_request, rpc_error(id, -32020, "HeaderMismatch: Mcp-Name"), req.version());
+      return {400, rpc_error(id, -32020, "HeaderMismatch: Mcp-Name"), {}};
   }
   if (method == "tools/call") {
     const auto schema = server.tool_schema(string_of(params, "name"));
-    if (schema) {
-      try {
-        const auto fields = header_fields(*schema);
-        const Json& args = find(params, "arguments");
-        for (const auto& field : fields) {
-          const Json& val = path_value(args, field.path);
-          const auto actual = header(req, field.header);
-          if (val.is_null()) {
-            if (!actual.empty()) throw Error(-32020, "HeaderMismatch: unexpected " + field.header);
-          } else {
-            const auto decoded = decode_header(actual);
-            if (!decoded || *decoded != header_value(val))
-              throw Error(-32020, "HeaderMismatch: " + field.header);
-          }
+    if (schema) try {
+      for (const auto& field : header_fields(*schema)) {
+        const Json& val = path_value(find(params, "arguments"), field.path);
+        const auto actual = header(req, field.header);
+        if (val.is_null()) {
+          if (!actual.empty()) throw Error(-32020, "HeaderMismatch: unexpected " + field.header);
+        } else {
+          const auto decoded = decode_header(actual);
+          if (!decoded || *decoded != header_value(val)) throw Error(-32020, "HeaderMismatch: " + field.header);
         }
-      } catch (const Error& e) {
-        return http_response(http::status::bad_request, rpc_error(id, -32020, e.what()), req.version());
       }
-    }
+    } catch (const Error& e) {return {400, rpc_error(id, -32020, e.what()), {}};}
   }
   Json response = server.handle(body, false);
-  if (response.is_null()) {
-    Response accepted{http::status::accepted, req.version()};
-    accepted.keep_alive(false); accepted.prepare_payload(); return accepted;
-  }
-  if (find(response, "error").is_object()) {
-    const auto error_code = find(find(response, "error"), "code");
-    if (error_code.is_int64() && error_code.as_int64() == -32601)
-      return http_response(http::status::not_found, response, req.version());
-  }
-  return http_response(http::status::ok, response, req.version());
+  if (response.is_null()) return {202, nullptr, {}};
+  if (find(response, "error").is_object() && find(find(response, "error"), "code").is_int64() &&
+      find(find(response, "error"), "code").as_integer<std::int64_t>() == -32601)
+    return {404, response, {}};
+  return {200, response, {}};
 }
-} // anonymous namespace
+void reply(httplib::Response& out, const HttpReply& result) {
+  out.status = result.status;
+  if (!result.challenge.empty()) out.set_header("WWW-Authenticate", result.challenge);
+  if (!result.json_result.is_null()) out.set_content(json::serialize(result.json_result), "application/json");
+}
+} // namespace
 
 void Server::run_http(unsigned short port, std::string host) {
-  auto address = asio::ip::make_address(host);
-  if (!address.is_loopback())
-    throw std::invalid_argument("Insecure HTTP must bind to loopback; deploy authenticated TLS proxy for remote access");
-  asio::io_context io;
-  tcp::acceptor listener(io, tcp::endpoint(address, port));
-  for (;;) {
-    tcp::socket socket(io);
-    listener.accept(socket);
-    std::thread([this, sock = std::move(socket), host, port]() mutable {
-      try {
-        beast::flat_buffer buffer;
-        http::request_parser<http::string_body> parser;
-        parser.body_limit(4 * 1024 * 1024);
-        http::read(sock, buffer, parser);
-        Request request = parser.release();
-        Response checked = on_http(*this, request, host, port);
-        Json message;
-        try { message = json::parse(request.body()); } catch (...) {}
-        if (string_of(message, "method") != "subscriptions/listen" ||
-            checked.result() != http::status::not_found ||
-            string_of(find(json::parse(checked.body()), "error"), "message") != "Method not found: subscriptions/listen") {
-          http::write(sock, checked);
-        } else {
-          Json id = find(message, "id");
-          const Json& filters = find(find(message, "params"), "notifications");
-          std::shared_ptr<Subscription> subscription;
-          try { subscription = subscribe(id, filters); }
-          catch (const Error& e) {
-            http::write(sock, http_response(http::status::bad_request, rpc_error(id, e.code, e.what())));
-            return;
+  if (host != "127.0.0.1" && host != "localhost" && host != "::1")
+    throw std::invalid_argument("Plain HTTP may only bind to loopback; use HTTPS reverse proxy for remote access");
+  httplib::Server server;
+  server.set_payload_max_length(4 * 1024 * 1024);
+  server.Get("/.well-known/oauth-protected-resource", [this](const auto&, auto& response) {
+    if (!http_requires_auth()) { response.status=404; return; }
+    response.set_content(json::serialize(protected_resource_metadata()), "application/json");
+  });
+  server.Post("/mcp", [this, host, port](const httplib::Request& req, httplib::Response& out) {
+    auto checked = on_http(*this, req, host, port);
+    Json body = nullptr;
+    try {body = json::parse(req.body);} catch (...) {}
+    if (string_of(body, "method") != "subscriptions/listen" || checked.status != 404 ||
+        string_of(find(checked.json_result, "error"), "message") != "Method not found: subscriptions/listen") {
+      reply(out, checked); return;
+    }
+    std::shared_ptr<Subscription> subscription;
+    try {subscription = subscribe(find(body, "id"), find(find(body, "params"), "notifications"));}
+    catch (const Error& e) { reply(out, {400, rpc_error(find(body,"id"),e.code,e.what()),{}}); return; }
+    out.set_header("Cache-Control", "no-cache");
+    out.set_header("X-Accel-Buffering", "no");
+    out.set_chunked_content_provider("text/event-stream",
+      [this, subscription](std::size_t, httplib::DataSink& sink) {
+        Json next = nullptr;
+        {
+          std::unique_lock lock(subscription->mutex);
+          if (!subscription->ready.wait_for(lock,std::chrono::seconds(15),[&]{
+            return subscription->closed || !subscription->messages.empty();
+          })) {return sink.write(": keepalive\n\n", 13);}
+          if (subscription->closed) {
+            Json finished = rpc_success(subscription->id, json::object{{"resultType","complete"},
+              {"_meta",json::object{{"io.modelcontextprotocol/subscriptionId",subscription->id}}}});
+            const auto data = "data: " + json::serialize(finished) + "\n\n";
+            sink.write(data.data(), data.size()); sink.done(); return false;
           }
-          http::response<http::empty_body> header_msg{http::status::ok, request.version()};
-          header_msg.set(http::field::content_type, "text/event-stream");
-          header_msg.set(http::field::cache_control, "no-cache");
-          header_msg.set("X-Accel-Buffering", "no");
-          header_msg.chunked(true);
-          header_msg.keep_alive(true);
-          http::response_serializer<http::empty_body> serializer{header_msg};
-          http::write_header(sock, serializer);
-          auto send = [&sock](const std::string& payload) {
-            asio::write(sock, http::make_chunk(asio::buffer(payload)));
-          };
-          for (;;) {
-            Json next = nullptr;
-            {
-              std::unique_lock lock(subscription->mutex);
-              if (!subscription->ready.wait_for(lock, std::chrono::seconds(15), [&] {
-                return subscription->closed || !subscription->messages.empty();
-              })) {
-                lock.unlock();
-                send(": keepalive\n\n");
-                continue;
-              }
-              if (subscription->closed) break;
-              next = std::move(subscription->messages.front());
-              subscription->messages.pop_front();
-            }
-            send("data: " + json::serialize(next) + "\n\n");
-          }
-          Json completed = rpc_success(subscription->id,
-            {{"resultType", "complete"}, {"_meta", {{"io.modelcontextprotocol/subscriptionId", subscription->id}}}});
-          send("data: " + json::serialize(completed) + "\n\n");
-          asio::write(sock, http::make_chunk_last());
+          next = std::move(subscription->messages.front()); subscription->messages.pop_front();
         }
-      } catch (const std::exception& e) {
-        std::cerr << "MCP HTTP error: " << e.what() << '\n';
-      }
-      beast::error_code ec;
-      sock.shutdown(tcp::socket::shutdown_both, ec);
-    }).detach();
-  }
+        auto data = "data: " + json::serialize(next) + "\n\n";
+        if (!sink.write(data.data(), data.size())) {close_subscription(subscription); return false;}
+        return true;
+      }, [this, subscription](bool) { close_subscription(subscription); });
+  });
+  if (!server.listen(host, port)) throw std::runtime_error("Cannot listen on HTTP interface");
 }
 
 namespace {
+// The stdio process transport has no external runtime dependencies.
 struct ProcessState {
   std::function<void(const Json&)> on_notification;
-  bp::ipstream output;
-  bp::opstream input;
-  bp::child child;
   std::mutex mutex;
+  FILE* child_stdout = nullptr;
+  FILE* child_stdin = nullptr;
+#ifdef _WIN32
+  PROCESS_INFORMATION process{};
+#else
+  pid_t pid = -1;
+#endif
   ProcessState(const std::string& executable, const std::vector<std::string>& args,
-               std::function<void(const Json&)> callback)
-      : on_notification(std::move(callback)),
-        child(executable, bp::args(args), bp::std_out > output, bp::std_in < input) {}
+               std::function<void(const Json&)> callback) : on_notification(std::move(callback)) {
+#ifdef _WIN32
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+    HANDLE rd_out=nullptr, wr_out=nullptr, rd_in=nullptr, wr_in=nullptr;
+    if (!CreatePipe(&rd_out,&wr_out,&sa,0) || !CreatePipe(&rd_in,&wr_in,&sa,0))
+      throw std::runtime_error("CreatePipe failed");
+    SetHandleInformation(rd_out,HANDLE_FLAG_INHERIT,0);
+    SetHandleInformation(wr_in,HANDLE_FLAG_INHERIT,0);
+    auto quote=[](const std::string& arg) {
+      std::string out="\"";
+      std::size_t slashes=0;
+      for (char ch:arg) {
+        if(ch=='\\'){++slashes;continue;}
+        if(ch=='\"'){out.append(slashes*2+1,'\\');out+='\"';slashes=0;continue;}
+        out.append(slashes,'\\');slashes=0;out+=ch;
+      }
+      out.append(slashes*2,'\\');return out+'\"';
+    };
+    std::string cmd=quote(executable);
+    for(const auto& a:args)cmd+=' '+quote(a);
+    STARTUPINFOA si{};si.cb=sizeof(si);si.dwFlags=STARTF_USESTDHANDLES;
+    si.hStdInput=rd_in;si.hStdOutput=wr_out;si.hStdError=GetStdHandle(STD_ERROR_HANDLE);
+    std::vector<char> command(cmd.begin(),cmd.end());command.push_back(0);
+    BOOL ok=CreateProcessA(executable.c_str(),command.data(),nullptr,nullptr,TRUE,CREATE_NO_WINDOW,nullptr,nullptr,&si,&process);
+    CloseHandle(rd_in);CloseHandle(wr_out);
+    if(!ok){CloseHandle(rd_out);CloseHandle(wr_in);throw std::runtime_error("CreateProcess failed");}
+    child_stdout=_fdopen(_open_osfhandle((intptr_t)rd_out,_O_RDONLY),"rb");
+    child_stdin=_fdopen(_open_osfhandle((intptr_t)wr_in,_O_WRONLY),"wb");
+#else
+    int in_pipe[2],out_pipe[2];
+    if(pipe(in_pipe)!=0) throw std::runtime_error("pipe failed");
+    if(pipe(out_pipe)!=0){close(in_pipe[0]);close(in_pipe[1]);throw std::runtime_error("pipe failed");}
+    pid=fork();
+    if(pid<0){close(in_pipe[0]);close(in_pipe[1]);close(out_pipe[0]);close(out_pipe[1]);throw std::runtime_error("fork failed");}
+    if(pid==0){
+      dup2(in_pipe[0],STDIN_FILENO);dup2(out_pipe[1],STDOUT_FILENO);
+      close(in_pipe[0]);close(in_pipe[1]);close(out_pipe[0]);close(out_pipe[1]);
+      std::vector<char*> argv;argv.push_back(const_cast<char*>(executable.c_str()));
+      for(const auto& a:args)argv.push_back(const_cast<char*>(a.c_str()));
+      argv.push_back(nullptr);execvp(executable.c_str(),argv.data());_exit(127);
+    }
+    close(in_pipe[0]);close(out_pipe[1]);
+    child_stdin=fdopen(in_pipe[1],"w");child_stdout=fdopen(out_pipe[0],"r");
+#endif
+    if(!child_stdin||!child_stdout)throw std::runtime_error("stdio stream creation failed");
+  }
   ~ProcessState() {
-    input.pipe().close();
-    if (child.running()) child.terminate();
-    child.wait();
+    if(child_stdin)fclose(child_stdin);
+#ifdef _WIN32
+    if(process.hProcess) {TerminateProcess(process.hProcess,0);WaitForSingleObject(process.hProcess,2000);CloseHandle(process.hProcess);CloseHandle(process.hThread);}
+#else
+    if(pid>0){kill(pid,SIGTERM);waitpid(pid,nullptr,0);}
+#endif
+    if(child_stdout)fclose(child_stdout);
   }
   Json send(const Json& message) {
-    std::lock_guard<std::mutex> lock(mutex);
-    input << json::serialize(message) << '\n' << std::flush;
-    if (find(message, "id").is_null()) return nullptr;
-    std::string line;
-    while (std::getline(output, line)) {
-      try {
-        Json response = json::parse(line);
-        if (find(message, "id").is_null()) return nullptr;
-        if (find(response, "id") == find(message, "id")) return response;
-        if (find(response, "method").is_string() && on_notification) on_notification(response);
-      } catch (const std::exception&) { throw std::runtime_error("Invalid JSON-RPC output from MCP server"); }
+    std::lock_guard lock(mutex);
+    auto line=json::serialize(message)+"\n";
+    if(fwrite(line.data(),1,line.size(),child_stdin)!=line.size()||fflush(child_stdin)!=0)
+      throw std::runtime_error("MCP child stdin closed");
+    if(find(message,"id").is_null()) return nullptr;
+    std::string output;
+    for(;;){
+      output.clear();int ch;
+      while((ch=fgetc(child_stdout))!=EOF && ch!='\n'){
+        if(output.size()>8*1024*1024)throw std::runtime_error("MCP stdout message too large");
+        output+=char(ch);
+      }
+      if(ch==EOF)throw std::runtime_error("MCP child stdout closed");
+      Json msg=json::parse(output);
+      if(find(msg,"id")==find(message,"id"))return msg;
+      if(find(msg,"method").is_string() && on_notification)on_notification(msg);
     }
-    throw std::runtime_error("MCP server closed stdout");
   }
 };
-struct ParsedUrl {std::string host, port, target; bool tls = false;};
-ParsedUrl parse_url(std::string url) {
-  const bool tls = url.starts_with("https://");
-  if (!tls && !url.starts_with("http://")) throw std::invalid_argument("URL must use http:// or https://");
-  url.erase(0, tls ? 8 : 7);
-  auto p = url.find('/');
-  std::string authority = url.substr(0, p);
-  std::string target = p == std::string::npos ? "/mcp" : url.substr(p);
-  p = authority.rfind(':');
-  if (p == std::string::npos) return {authority, tls ? "443" : "80", target, tls};
-  return {authority.substr(0,p), authority.substr(p+1), target, tls};
+struct ParsedUrl {std::string host,port,target,scheme;};
+ParsedUrl parse_url(const std::string& url) {
+  auto at=url.find("://");
+  if(at==std::string::npos || (url.substr(0,at)!="http" && url.substr(0,at)!="https"))
+    throw std::invalid_argument("Invalid HTTP(S) URL");
+  auto scheme=url.substr(0,at), from=at+3;
+  auto end=url.find_first_of("/?#",from);
+  auto authority=url.substr(from,end==std::string::npos?end:end-from);
+  if(authority.empty()||authority.find('@')!=std::string::npos)throw std::invalid_argument("Invalid URL authority");
+  std::string host,port=scheme=="https"?"443":"80";
+  if(authority[0]=='['){auto close=authority.find(']');if(close==std::string::npos)throw std::invalid_argument("Invalid IPv6 URL");host=authority.substr(1,close-1);if(close+1<authority.size()){if(authority[close+1]!=':')throw std::invalid_argument("Invalid port");port=authority.substr(close+2);}}
+  else {auto colon=authority.find(':');host=authority.substr(0,colon);if(colon!=std::string::npos)port=authority.substr(colon+1);}
+  return {host,port,end==std::string::npos?"/mcp":url.substr(end),scheme};
+}
+std::unique_ptr<httplib::Client> new_http_client(const ParsedUrl& url) {
+  auto c=std::make_unique<httplib::Client>(url.scheme+"://"+url.host+":"+url.port);
+  c->set_connection_timeout(5,0);c->set_read_timeout(30,0);
+  c->set_follow_location(false);
+  // HTTPS verification is ON by default in cpp-httplib OpenSSL builds.
+  c->enable_server_certificate_verification(true);
+  return c;
 }
 struct HttpState {
   ParsedUrl url;
   std::map<std::string, Json> tool_schemas;
   std::mutex mutex;
   std::string token;
-  explicit HttpState(const std::string& path, std::string bearer)
-    : url(parse_url(path)), token(std::move(bearer)) {}
+  std::shared_ptr<oauth::Session> oauth_session;
+  explicit HttpState(const std::string& path,std::string bearer):url(parse_url(path)),token(std::move(bearer)){}
   Json send(const Json& msg) {
-    std::lock_guard<std::mutex> lock(mutex);
-    const std::string method = string_of(msg, "method");
-    const Json& params = find(msg, "params");
-    asio::io_context io;
-    tcp::resolver resolver(io);
-    Request req{http::verb::post, url.target, 11};
-    req.set(http::field::host, url.host + ":" + url.port);
-    req.set(http::field::user_agent, "myMcpTools/0.1");
-    req.set(http::field::accept, "application/json, text/event-stream");
-    req.set(http::field::content_type, "application/json");
-    if (!token.empty()) req.set(http::field::authorization, "Bearer " + token);
-    req.set("MCP-Protocol-Version", ProtocolVersion);
-    req.set("Mcp-Method", method);
-    if (method == "tools/call" || method == "prompts/get" || method == "resources/read" ||
-        method == "tasks/get" || method == "tasks/update" || method == "tasks/cancel")
-      req.set("Mcp-Name", encode_header(string_of(params, method == "resources/read" ? "uri" :
-                                            method.starts_with("tasks/") ? "taskId" : "name")));
-    if (method == "tools/call") {
-      const auto it = tool_schemas.find(string_of(params, "name"));
-      if (it != tool_schemas.end()) {
-        const Json& values = find(params, "arguments");
-        for (const auto& field : header_fields(it->second)) {
-          const Json& value = path_value(values, field.path);
-          if (!value.is_null()) req.set(field.header, encode_header(header_value(value)));
-        }
+    std::lock_guard lock(mutex);
+    const auto method=string_of(msg,"method");
+    const Json& params=find(msg,"params");
+    httplib::Headers headers{{"Accept","application/json, text/event-stream"},
+        {"MCP-Protocol-Version",ProtocolVersion},{"Mcp-Method",method}};
+    const std::string bearer = oauth_session ? oauth_session->bearer_token() : token;
+    if(!bearer.empty())headers.emplace("Authorization","Bearer "+bearer);
+    if(method=="tools/call"||method=="prompts/get"||method=="resources/read"||method.starts_with("tasks/"))
+      headers.emplace("Mcp-Name",encode_header(string_of(params,method=="resources/read"?"uri":method.starts_with("tasks/")?"taskId":"name")));
+    if(method=="tools/call"){
+      auto it=tool_schemas.find(string_of(params,"name"));
+      if(it!=tool_schemas.end())for(const auto& field:header_fields(it->second)){
+        const Json& value=path_value(find(params,"arguments"),field.path);
+        if(!value.is_null())headers.emplace(field.header,encode_header(header_value(value)));
       }
     }
-    req.body() = json::serialize(msg);
-    req.prepare_payload();
-    beast::flat_buffer buffer;
-    http::response<http::string_body> res;
-    if (url.tls) {
-      asio::ssl::context ssl_context(asio::ssl::context::tls_client);
-      ssl_context.set_default_verify_paths();
-      beast::ssl_stream<beast::tcp_stream> stream(io, ssl_context);
-      stream.set_verify_mode(asio::ssl::verify_peer);
-      stream.set_verify_callback(asio::ssl::host_name_verification(url.host));
-      if (!SSL_set_tlsext_host_name(stream.native_handle(), url.host.c_str()))
-        throw std::runtime_error("TLS SNI initialization failed");
-      beast::get_lowest_layer(stream).connect(resolver.resolve(url.host, url.port));
-      stream.handshake(asio::ssl::stream_base::client);
-      http::write(stream, req);
-      http::read(stream, buffer, res);
-      beast::error_code ec;
-      stream.shutdown(ec);
-    } else {
-      beast::tcp_stream stream(io);
-      stream.connect(resolver.resolve(url.host, url.port));
-      http::write(stream, req);
-      http::read(stream, buffer, res);
-      beast::error_code ec;
-      stream.socket().shutdown(tcp::socket::shutdown_both, ec);
-    }
-    if (res.result() == http::status::accepted) return nullptr;
-    Json response;
-    if (std::string(res[http::field::content_type]).starts_with("text/event-stream")) {
-      std::istringstream ss(res.body());
-      std::string line;
-      while (std::getline(ss, line)) {
-        if (!line.starts_with("data:")) continue;
-        std::string data = line.substr(5);
-        if (!data.empty() && data[0] == ' ') data.erase(0,1);
-        auto parsed = json::parse(data);
-        if (!find(parsed, "id").is_null()) response = parsed;
+    auto c=new_http_client(url);
+    auto response=c->Post(url.target,headers,json::serialize(msg),"application/json");
+    if(!response)throw std::runtime_error("HTTP transport error: "+httplib::to_string(response.error()));
+    if(response->status==202)return nullptr;
+    if(response->get_header_value("Content-Type").starts_with("text/event-stream")){
+      std::istringstream in(response->body);std::string line;Json result=nullptr;
+      while(std::getline(in,line))if(line.starts_with("data:")){
+        auto event=json::parse(line.substr(5));
+        if(find(event,"id")==find(msg,"id"))result=std::move(event);
       }
-      if (response.is_null()) throw std::runtime_error("No JSON-RPC response in SSE stream");
-    } else response = json::parse(res.body());
-    if (method == "tools/list") {
-      const Json& tools = find(find(response, "result"), "tools");
-      if (tools.is_array()) {
-        for (const auto& tool : tools.as_array()) {
-          const auto name = string_of(tool, "name");
-          const auto schema = find(tool, "inputSchema");
-          try { header_fields(schema); tool_schemas[name] = schema; }
-          catch (const Error&) { tool_schemas.erase(name); }
-        }
-      }
+      if(result.is_null())throw std::runtime_error("SSE stream closed without matching result");
+      return result;
     }
-    return response;
+    if(response->body.empty())throw std::runtime_error("Empty HTTP response");
+    return json::parse(response->body);
   }
 };
-} // anonymous namespace
+} // namespace
 
 void Client::listen_http(const std::string& url, Json notifications,
                          std::function<bool(const Json&)> on_event) {
-  if (!notifications.is_object() || !on_event) throw std::invalid_argument("Invalid subscription callback/filter");
-  auto target = parse_url(url);
-  asio::io_context io;
-  tcp::resolver resolver(io);
-  beast::tcp_stream stream(io);
-  stream.connect(resolver.resolve(target.host, target.port));
-  Json message = {{"jsonrpc", "2.0"}, {"id", 1}, {"method", "subscriptions/listen"},
-    {"params", {{"notifications", std::move(notifications)},
-                {"_meta", {{"io.modelcontextprotocol/protocolVersion", ProtocolVersion},
-                           {"io.modelcontextprotocol/clientCapabilities", json::object{}},
-                           {"io.modelcontextprotocol/clientInfo", {{"name", "mymcp-client"}, {"version", "1.0.0"}}}}}}}};
-  Request req{http::verb::post, target.target, 11};
-  req.set(http::field::host, target.host + ":" + target.port);
-  req.set(http::field::accept, "application/json, text/event-stream");
-  req.set(http::field::content_type, "application/json");
-  req.set("MCP-Protocol-Version", ProtocolVersion);
-  req.set("Mcp-Method", "subscriptions/listen");
-  req.body() = json::serialize(message);
-  req.prepare_payload();
-  http::write(stream, req);
-  beast::flat_buffer buffer;
-  http::response_parser<http::buffer_body> parser;
-  parser.body_limit((std::numeric_limits<std::uint64_t>::max)());
-  http::read_header(stream, buffer, parser);
-  if (parser.get().result() != http::status::ok ||
-      !std::string(parser.get()[http::field::content_type]).starts_with("text/event-stream"))
-    throw Error(-32603, "Server rejected SSE subscription");
+  const auto target=parse_url(url);
+  const Json request=json::object{{"jsonrpc","2.0"},{"id",1},{"method","subscriptions/listen"},
+    {"params",json::object{{"notifications",std::move(notifications)},
+      {"_meta",json::object{{"io.modelcontextprotocol/protocolVersion",ProtocolVersion},
+         {"io.modelcontextprotocol/clientCapabilities",json::object{}},
+         {"io.modelcontextprotocol/clientInfo",json::object{{"name","mymcp-listener"},{"version","1.0"}}}}}}}};
+  auto c=new_http_client(target);
+  c->set_read_timeout(3600,0);
+  httplib::Headers headers{{"Accept","application/json, text/event-stream"},
+    {"MCP-Protocol-Version",ProtocolVersion},{"Mcp-Method","subscriptions/listen"}};
   std::string pending;
-  while (!parser.is_done()) {
-    char chunk[4096];
-    parser.get().body().data = chunk;
-    parser.get().body().size = sizeof(chunk);
-    beast::error_code ec;
-    http::read_some(stream, buffer, parser, ec);
-    const std::size_t n = sizeof(chunk) - parser.get().body().size;
-    pending.append(chunk, n);
-    for (;;) {
-      const auto sep = pending.find("\n\n");
-      if (sep == std::string::npos) break;
-      std::string event = pending.substr(0, sep);
-      pending.erase(0, sep + 2);
-      std::string data;
-      std::istringstream lines(event);
-      std::string line;
-      while (std::getline(lines, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line.starts_with("data:")) {
-          if (!data.empty()) data += '\n';
-          std::string segment = line.substr(5);
-          if (!segment.empty() && segment[0] == ' ') segment.erase(0, 1);
-          data += segment;
+  bool continue_reading=true;
+  auto res=c->Post(target.target,headers,json::serialize(request),"application/json",
+    [&](const char* data,std::size_t len){
+      pending.append(data,len);
+      for(;;){auto sep=pending.find("\n\n");if(sep==std::string::npos)break;
+        auto frame=pending.substr(0,sep);pending.erase(0,sep+2);
+        std::string event;std::istringstream lines(frame);std::string line;
+        while(std::getline(lines,line)){
+          if(!line.empty()&&line.back()=='\r')line.pop_back();
+          if(line.starts_with("data:")){if(!event.empty())event+='\n';auto part=line.substr(5);if(!part.empty()&&part[0]==' ')part.erase(0,1);event+=part;}
         }
+        if(!event.empty()&&!on_event(json::parse(event))){continue_reading=false;return false;}
       }
-      if (!data.empty()) {
-        if (!on_event(json::parse(data))) {
-          beast::error_code ignored;
-          stream.socket().shutdown(tcp::socket::shutdown_both, ignored);
-          return;
-        }
-      }
-    }
-    if (ec == http::error::need_buffer) continue;
-    if (ec == asio::error::eof || ec == http::error::end_of_stream) break;
-    if (ec) throw beast::system_error(ec);
-  }
+      if(pending.size()>4*1024*1024)throw std::runtime_error("SSE frame too large");
+      return true;
+    });
+  if(!res&&continue_reading)throw std::runtime_error("HTTP SSE connection failed");
+  if(res&&res->status!=200)throw std::runtime_error("HTTP SSE subscription rejected");
 }
 
 Client::Client(std::function<Json(const Json&)> send, std::string name)
@@ -1257,6 +1197,15 @@ Client Client::http(const std::string& url, std::string bearer_token) {
   client.http_ = true;
   return client;
 }
+Client Client::http_oauth(const std::string& url, std::shared_ptr<oauth::Session> session) {
+  if (!session) throw std::invalid_argument("OAuth session is null");
+  auto state = std::make_shared<HttpState>(url, std::string{});
+  state->oauth_session = std::move(session);
+  Client client([state](const Json& message){ return state->send(message); });
+  client.allow_legacy_ = false;
+  client.http_ = true;
+  return client;
+}
 Json Client::request(const std::string& method, Json params) {
   if (!params.is_object()) throw std::invalid_argument("Request params must be an object");
   if (!connected_ && method != "server/discover" && method != "initialize") discover();
@@ -1264,18 +1213,18 @@ Json Client::request(const std::string& method, Json params) {
     Json actual_params = params;
     if (!legacy_) {
       json::object metadata = find(actual_params, "_meta").is_object() ?
-                              find(actual_params, "_meta").as_object() : json::object{};
+                              find(actual_params, "_meta") : json::object{};
       metadata["io.modelcontextprotocol/protocolVersion"] = ProtocolVersion;
       metadata["io.modelcontextprotocol/clientCapabilities"] = capabilities_;
       metadata["io.modelcontextprotocol/clientInfo"] = {{"name", name_}, {"version", "1.0.0"}};
-      actual_params.as_object()["_meta"] = std::move(metadata);
+      actual_params["_meta"] = std::move(metadata);
     }
-    Json message = {{"jsonrpc", "2.0"}, {"id", next_id_++}, {"method", method}, {"params", std::move(actual_params)}};
+    Json message = json::object{{"jsonrpc", "2.0"}, {"id", next_id_++}, {"method", method}, {"params", std::move(actual_params)}};
     Json response = send_(message);
     if (!response.is_object()) throw std::runtime_error("Invalid JSON-RPC response");
     if (find(response, "id") != find(message, "id")) throw std::runtime_error("JSON-RPC response ID mismatch");
     const Json& e = find(response, "error");
-    if (e.is_object()) throw Error(static_cast<int>(find(e, "code").as_int64()), string_of(e, "message", "MCP error"));
+    if (e.is_object()) throw Error(static_cast<int>(find(e, "code").as_integer<std::int64_t>()), string_of(e, "message", "MCP error"));
     const Json& result = find(response, "result");
     if (!result.is_object()) throw std::runtime_error("Invalid MCP result");
     if (method == "tools/list") tools_known_ = true;
@@ -1285,10 +1234,10 @@ Json Client::request(const std::string& method, Json params) {
     if (!input_requests.is_object()) throw Error(-32603, "Invalid inputRequests");
     Json answers = input_handler_(input_requests);
     if (!answers.is_object()) throw Error(-32602, "Input callback must return an object");
-    params.as_object()["inputResponses"] = std::move(answers);
+    params["inputResponses"] = std::move(answers);
     const Json& state = find(result, "requestState");
-    if (state.is_string()) params.as_object()["requestState"] = state;
-    else params.as_object().erase("requestState");
+    if (state.is_string()) params["requestState"] = state;
+    else params.erase("requestState");
   }
   throw Error(-32603, "Input-required rounds exceeded");
 }
@@ -1296,8 +1245,8 @@ Json Client::request_with_progress(const std::string& method, Json params, Json 
   if (!params.is_object() || !(token.is_string() || token.is_int64() || token.is_uint64()))
     throw std::invalid_argument("Invalid progress parameters/token");
   Json metadata = find(params, "_meta").is_object() ? find(params,"_meta") : Json(json::object{});
-  metadata.as_object()["progressToken"] = std::move(token);
-  params.as_object()["_meta"] = std::move(metadata);
+  metadata["progressToken"] = std::move(token);
+  params["_meta"] = std::move(metadata);
   return request(method, std::move(params));
 }
 Json Client::discover() {
@@ -1306,7 +1255,7 @@ Json Client::discover() {
     Json info = request("server/discover");
     const auto& versions = find(info, "supportedVersions");
     if (!versions.is_array()) throw Error(-32600, "Malformed discovery response");
-    for (const auto& version : versions.as_array()) {
+    for (const auto& version : versions.array_range()) {
       if (version.is_string() && version.as_string() == ProtocolVersion) {
         connected_ = true;
         discovery_ = info;
@@ -1325,7 +1274,7 @@ Json Client::discover() {
   connected_ = true;
   discovery_ = init;
   // The legacy notifications/initialized message has no response. Send it directly.
-  Json notification = {{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}};
+  Json notification = json::object{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}};
   send_(notification);
   return init;
 }
@@ -1352,8 +1301,8 @@ void Client::extension(std::string name, Json settings) {
   if (connected_) throw std::logic_error("Extensions must be configured before discovery");
   if (name.find('/') == std::string::npos || !settings.is_object())
     throw std::invalid_argument("Invalid extension identifier/settings");
-  if (!capabilities_.as_object().contains("extensions")) capabilities_.as_object()["extensions"] = json::object{};
-  capabilities_.as_object().at("extensions").as_object()[name] = std::move(settings);
+  if (!capabilities_.contains("extensions")) capabilities_["extensions"] = json::object{};
+  capabilities_.at("extensions")[name] = std::move(settings);
 }
 Json Client::list_all(const std::string& method, const std::string& array_field) {
   if (method != "tools/list" && method != "resources/list" && method != "prompts/list" &&
@@ -1364,7 +1313,7 @@ Json Client::list_all(const std::string& method, const std::string& array_field)
   for (size_t i = 0; i < 10000; ++i) {
     auto response = request(method, params);
     if (!find(response, array_field).is_array()) throw Error(-32603, "Invalid list response");
-    for (const auto& item : find(response, array_field).as_array()) combined.as_array().push_back(item);
+    for (const auto& item : find(response, array_field).array_range()) combined.push_back(item);
     const auto& next = find(response, "nextCursor");
     if (next.is_null()) return combined;
     if (!next.is_string()) throw Error(-32603, "Invalid nextCursor");

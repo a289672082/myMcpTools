@@ -11,3 +11,13 @@
 - stdio tools can check cooperative `Server::is_cancelled()` and report progress. Arbitrary blocking callbacks cannot be preempted safely.
 - Rate limiting, comprehensive request timeouts, server resource quotas, HTTP SSE disconnect cancellation, native TLS hosting and cross-SDK conformance are not implemented.
 - Tool prompts, URI templates, extensions, and tool annotations should be treated as untrusted application input. Limit filesystem and system privileges.
+
+### Migration OAuth security constraints
+
+The new `oauth::Session` uses HTTPS for external discovery and token endpoints; only
+explicit loopback is permitted for development. It disables cross-origin redirects for
+token exchanges and requires exact issuer, resource and state checks. Do not print
+`Authorization::code_verifier`, authorization codes, access tokens or refresh tokens.
+Browser-based authorization is interactive and application-managed. Do not reuse a
+session for a different resource/audience. Treat OAuth tokens as secrets, and implement
+revocation, secure OS storage and client registration policy in the host application.

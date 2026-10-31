@@ -1,6 +1,6 @@
 #pragma once
 
-#include <boost/json.hpp>
+#include "mymcp/json.hpp"
 #include <functional>
 #include <map>
 #include <cstddef>
@@ -20,7 +20,7 @@
 #include <vector>
 
 namespace mymcp {
-namespace json = boost::json;
+namespace oauth {class Session;}
 using Json = json::value;
 inline constexpr const char* ProtocolVersion = "2026-07-28";
 inline constexpr const char* LegacyProtocolVersion = "2025-11-25";
@@ -43,12 +43,12 @@ template<class T> struct optional_type : std::false_type {};
 template<class T> struct optional_type<std::optional<T>> : std::true_type {};
 template<class T> Json schema() {
   if constexpr (optional_type<T>::value) return schema<typename T::value_type>();
-  else if constexpr (std::is_same_v<T, bool>) return {{"type", "boolean"}};
-  else if constexpr (std::is_integral_v<T>) return {{"type", "integer"}};
-  else if constexpr (std::is_floating_point_v<T>) return {{"type", "number"}};
-  else if constexpr (std::is_same_v<T, std::string>) return {{"type", "string"}};
+  else if constexpr (std::is_same_v<T, bool>) return json::object{{"type", "boolean"}};
+  else if constexpr (std::is_integral_v<T>) return json::object{{"type", "integer"}};
+  else if constexpr (std::is_floating_point_v<T>) return json::object{{"type", "number"}};
+  else if constexpr (std::is_same_v<T, std::string>) return json::object{{"type", "string"}};
   else if constexpr (std::is_same_v<T, Json>) return json::object{};
-  else return {{"type", "object"}};
+  else return json::object{{"type", "object"}};
 }
 template<class T> T decode(const Json& j) {
   if constexpr (optional_type<T>::value) {
@@ -58,18 +58,18 @@ template<class T> T decode(const Json& j) {
   else if constexpr (std::is_same_v<T, std::string>) return std::string(j.as_string());
   else if constexpr (std::is_same_v<T, bool>) return j.as_bool();
   else if constexpr (std::is_integral_v<T>) {
-    if (j.is_int64()) return static_cast<T>(j.as_int64());
-    if (j.is_uint64()) return static_cast<T>(j.as_uint64());
+    if (j.is_int64()) return static_cast<T>(j.as_integer<std::int64_t>());
+    if (j.is_uint64()) return static_cast<T>(j.as_integer<std::uint64_t>());
     throw Error(-32602, "Expected integer argument");
   } else if constexpr (std::is_floating_point_v<T>) {
     if (j.is_double()) return static_cast<T>(j.as_double());
-    if (j.is_int64()) return static_cast<T>(j.as_int64());
-    if (j.is_uint64()) return static_cast<T>(j.as_uint64());
+    if (j.is_int64()) return static_cast<T>(j.as_integer<std::int64_t>());
+    if (j.is_uint64()) return static_cast<T>(j.as_integer<std::uint64_t>());
     throw Error(-32602, "Expected number argument");
   } else static_assert(!sizeof(T), "Unsupported argument type: use Json");
 }
-template<class T> T get_arg(const json::object& args, const Arg<T>& spec) {
-  const auto* p = args.if_contains(spec.name);
+template<class T> T get_arg(const Json& args, const Arg<T>& spec) {
+  const auto* p = json::if_contains(args, spec.name);
   if (!p || p->is_null()) {
     if constexpr (optional_type<T>::value) return std::nullopt;
     if (!spec.required) return T{};
@@ -92,7 +92,7 @@ Json make_tool_result(double value);
 class Server {
 public:
   explicit Server(std::string name, std::string version = "1.0.0");
-  using ToolHandler = std::function<Json(const json::object&)>;
+  using ToolHandler = std::function<Json(const Json&)>;
   using TaskHandler = std::function<Json(const Json& input_responses, std::atomic_bool& cancelled)>;
   void add_tool(std::string name, std::string description, Json input_schema, ToolHandler handler);
   // Low-level advanced handler receives all tools/call params, including MRTR inputResponses.
@@ -109,14 +109,14 @@ public:
     json::array required;
     (void)std::initializer_list<int>{([&] {
       Json p = detail::schema<Ts>();
-      if (!arguments.description.empty()) p.as_object()["description"] = arguments.description;
+      if (!arguments.description.empty()) p["description"] = arguments.description;
       properties[arguments.name] = std::move(p);
       if (arguments.required && !detail::optional_type<Ts>::value) required.emplace_back(arguments.name);
     }(), 0)...};
-    Json schema = {{"type", "object"}, {"properties", std::move(properties)},
+    Json schema = json::object{{"type", "object"}, {"properties", std::move(properties)},
                    {"required", std::move(required)}, {"additionalProperties", false}};
     add_tool(std::move(name), std::move(description), std::move(schema),
-      [f = std::move(fn), arguments...](const json::object& values) -> Json {
+      [f = std::move(fn), arguments...](const Json& values) -> Json {
         try {
           if constexpr (std::is_void_v<std::invoke_result_t<F, Ts...>>) {
             std::invoke(f, detail::get_arg<Ts>(values, arguments)...);
@@ -125,21 +125,21 @@ public:
             return detail::make_tool_result(std::invoke(f, detail::get_arg<Ts>(values, arguments)...));
           }
         } catch (const std::exception& e) {
-          return {{"content", json::array{{{"type", "text"}, {"text", e.what()}}}}, {"isError", true}};
+          return json::object{{"content", json::array{{{"type", "text"}, {"text", e.what()}}}}, {"isError", true}};
         }
       });
   }
   void resource(std::string uri, std::string name, std::function<std::string()> reader, std::string mime_type = "text/plain");
-  void prompt(std::string name, std::string description, std::function<std::string(const json::object&)> reader);
+  void prompt(std::string name, std::string description, std::function<std::string(const Json&)> reader);
   // Higher-level APIs preserve the full MCP JSON result representation.
   void resource_template(std::string uri_template, std::string name,
-                         std::function<Json(const std::string&, const json::object&)> reader,
+                         std::function<Json(const std::string&, const Json&)> reader,
                          std::string mime_type = "text/plain", std::string description = "");
   void prompt_full(std::string name, std::string description,
-                   std::function<Json(const json::object&)> handler,
+                   std::function<Json(const Json&)> handler,
                    Json arguments = json::array{});
-  void completion(std::function<Json(const json::object&)> handler);
-  void method(std::string method_name, std::function<Json(const json::object&)> handler);
+  void completion(std::function<Json(const Json&)> handler);
+  void method(std::string method_name, std::function<Json(const Json&)> handler);
   void extension(std::string extension_id, Json settings = json::object{});
   void cache(std::uint64_t ttl_ms, std::string scope = "public");
   void page_size(std::size_t size);
@@ -182,19 +182,19 @@ public:
 private:
   struct Tool { std::string description; Json schema; ToolHandler handler; bool with_context = false; bool requires_tasks = false; };
   struct Resource { std::string name; std::string mime; std::function<std::string()> reader; };
-  struct Prompt { std::string description; std::function<std::string(const json::object&)> reader;
-                  std::function<Json(const json::object&)> full_reader; Json arguments = json::array{}; };
+  struct Prompt { std::string description; std::function<std::string(const Json&)> reader;
+                  std::function<Json(const Json&)> full_reader; Json arguments = json::array{}; };
   struct ResourceTemplate {
     std::string name, mime, description;
-    std::function<Json(const std::string&, const json::object&)> reader;
+    std::function<Json(const std::string&, const Json&)> reader;
   };
   std::string name_, version_, instructions_;
   std::map<std::string, Tool> tools_;
   std::map<std::string, Resource> resources_;
   std::map<std::string, Prompt> prompts_;
   std::map<std::string, ResourceTemplate> templates_;
-  std::map<std::string, std::function<Json(const json::object&)>> methods_;
-  std::function<Json(const json::object&)> completion_;
+  std::map<std::string, std::function<Json(const Json&)>> methods_;
+  std::function<Json(const Json&)> completion_;
   json::object extensions_;
   std::uint64_t ttl_ms_ = 0;
   std::string cache_scope_ = "public";
@@ -225,6 +225,8 @@ public:
                         std::function<void(const Json&)> on_notification = {});
   // HTTPS verifies server certificates and hostnames against system trust roots.
   static Client http(const std::string& url, std::string bearer_token = {});
+  // OAuth-backed HTTP transport: acquire tokens with oauth::Session first.
+  static Client http_oauth(const std::string& url, std::shared_ptr<oauth::Session> session);
   // Blocks while a long-lived HTTP subscription is open. Return false to disconnect.
   static void listen_http(const std::string& url, Json notifications,
                           std::function<bool(const Json&)> on_event);
@@ -251,7 +253,7 @@ public:
   // The SDK retries the original request with inputResponses and the opaque requestState.
   void on_input_required(std::function<Json(const Json&)> handler) {
     input_handler_ = std::move(handler);
-    capabilities_.as_object()["elicitation"] = {{"form", json::object{}}};
+    capabilities_["elicitation"] = {{"form", json::object{}}};
   }
 private:
   std::function<Json(const Json&)> send_;
