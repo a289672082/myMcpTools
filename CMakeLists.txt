@@ -141,3 +141,20 @@ if(Python3_Interpreter_FOUND)
       "$<TARGET_FILE:run_agent_tools_demo>")
   set_tests_properties(agent_tools_demo PROPERTIES TIMEOUT 90)
 endif()
+
+# Optional OpenAI Agent, built on the existing mymcp Client/Server SDK.
+add_library(myagent STATIC src/agent.cpp)
+add_library(mymcp::agent ALIAS myagent)
+target_link_libraries(myagent PUBLIC mymcp)
+target_include_directories(myagent PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+install(TARGETS myagent EXPORT mymcpTargets ARCHIVE DESTINATION lib)
+
+add_executable(mymcp_agent_tests tests/test_agent.cpp)
+target_link_libraries(mymcp_agent_tests PRIVATE myagent)
+add_test(NAME agent COMMAND mymcp_agent_tests)
+set_tests_properties(agent PROPERTIES TIMEOUT 20)
+
+add_executable(run_agent_demo examples/run_agent_demo.cpp)
+target_link_libraries(run_agent_demo PRIVATE myagent)

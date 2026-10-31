@@ -254,3 +254,14 @@ To run a complete no-argument client/server pair, start `run_http_server_demo`, 
 ## All-in-one agent toolbox demo
 
 **`examples/run_agent_tools_demo.cpp`** is a single no-argument stdio MCP server that registers 23 useful tools across 10 groups: file reads/writes, directories, filename/content search, precise edits/patches, Git, allowlisted commands and a fixed build example, restricted HTTPS fetch/download, and C++ project inspection. The implementation has Chinese inline comments and runs within an automatically created `demo_workspace/` directory. It is intended for local Codex/Claude MCP experiments, **not** a hardened sandbox. See [examples/README.md](examples/README.md) for the complete tool matrix, security limits, and usage.
+
+## OpenAI C++ Agent
+
+The separate **mymcp::agent** module uses the existing MCP Client/Server and
+the vendored HTTP and JSON libraries. It supports OpenAI Responses, tool
+invocation, multi-turn sessions, SKILL.md loading, image input, speech
+transcription, and MP3 speech output. See [AGENT.md](AGENT.md), and the
+no-argument [run_agent_demo](examples/run_agent_demo.cpp).
+
+No API credentials are required for the offline agent unit tests:
+    ctest --test-dir build -R '^agent$' --output-on-failure
