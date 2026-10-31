@@ -22,7 +22,7 @@ int run_tools_demo() {
     auto client = demo::in_process(server);
     demo::print("discovery", client.discover());
     auto tools = client.list_all("tools/list", "tools");
-    demo::check(tools.at("tools").size() == 3, "pagination failed");
+    demo::check(tools.size() == 3, "pagination failed");
     demo::print("all tools", tools);
     auto answer = client.call("add", mymcp::json::object{{"a", 10}, {"b", 32}});
     demo::print("add(10,32)", answer);

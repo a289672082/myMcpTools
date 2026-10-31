@@ -1,5 +1,6 @@
 """Launch the no-argument network demos. No arguments are passed to demo executables."""
 import subprocess
+import json
 import sys
 import socket
 import time
@@ -44,8 +45,15 @@ try:
         metadata = response.read().decode()
         assert 'authorization_servers' in metadata
     execute(protected_client, "run_oauth_resource_client_demo OK")
+    request_body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name": "demo-test", "version": "1.0"},
+        "io.modelcontextprotocol/clientCapabilities": {}
+    }}}).encode("utf-8")
     request = urllib.request.Request('http://127.0.0.1:33868/mcp', method='POST',
-       data=b'{}', headers={'Content-Type': 'application/json'})
+       data=request_body, headers={"Content-Type": "application/json",
+         "Accept": "application/json, text/event-stream",
+         "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list"})
     try:
         urllib.request.urlopen(request, timeout=3)
         raise AssertionError('Unprotected HTTP MCP request was accepted')
