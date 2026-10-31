@@ -33,9 +33,9 @@ target_link_libraries(mymcp PUBLIC Threads::Threads OpenSSL::SSL OpenSSL::Crypto
 if(WIN32)
  target_link_libraries(mymcp PUBLIC ws2_32 crypt32)
 endif()
-add_executable(mymcp_example_server examples/server.cpp)
+add_executable(mymcp_example_server tests/fixtures/server.cpp)
 target_link_libraries(mymcp_example_server PRIVATE mymcp)
-add_executable(mymcp_example_client examples/client.cpp)
+add_executable(mymcp_example_client tests/fixtures/client.cpp)
 target_link_libraries(mymcp_example_client PRIVATE mymcp)
 add_executable(mymcp_listen_client tests/listen_client.cpp)
 target_link_libraries(mymcp_listen_client PRIVATE mymcp)
@@ -71,7 +71,7 @@ add_test(NAME oauth_session COMMAND mymcp_oauth_session_tests)
 
 # Comprehensive, opt-in executable examples. Never used as production credential stores.
 foreach(example IN ITEMS showcase_server showcase_client showcase_subscribe oauth_login oauth_resource_server)
-  add_executable(mymcp_${example} examples/${example}.cpp)
+  add_executable(mymcp_${example} tests/fixtures/${example}.cpp)
   target_link_libraries(mymcp_${example} PRIVATE mymcp)
 endforeach()
 if(Python3_Interpreter_FOUND)
@@ -82,4 +82,31 @@ if(Python3_Interpreter_FOUND)
     "$<TARGET_FILE:mymcp_oauth_resource_server>")
   set_tests_properties(showcase_examples PROPERTIES TIMEOUT 75)
   set_tests_properties(oauth_resource_example PROPERTIES TIMEOUT 25)
+endif()
+
+# No-argument, single-purpose demos. Every source defines run_xxxx_demo() and a
+# no-argument main() that calls it; the command line is never used for setup.
+foreach(demo IN ITEMS
+  tools resources prompts mrtr tasks extensions stdio_server stdio_client
+  http_server http_client subscriptions oauth oauth_login oauth_resource)
+  add_executable(run_${demo}_demo examples/run_${demo}_demo.cpp)
+  target_link_libraries(run_${demo}_demo PRIVATE mymcp)
+  target_include_directories(run_${demo}_demo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples)
+endforeach()
+# CMake fills in the correct Debug/Release path to the demo stdio server on
+# Linux, macOS and Windows. No argv, cwd assumptions or handwritten .exe paths.
+add_dependencies(run_stdio_client_demo run_stdio_server_demo)
+target_compile_definitions(run_stdio_client_demo PRIVATE
+  MYMCP_DEMO_STDIO_SERVER="$<TARGET_FILE:run_stdio_server_demo>")
+
+foreach(demo IN ITEMS tools resources prompts mrtr tasks extensions stdio_client oauth oauth_login)
+  add_test(NAME demo_${demo} COMMAND run_${demo}_demo)
+  set_tests_properties(demo_${demo} PROPERTIES TIMEOUT 20)
+endforeach()
+if(Python3_Interpreter_FOUND)
+  add_test(NAME demo_http_and_sse
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/run_demo_smoke.py"
+      "$<TARGET_FILE:run_http_server_demo>" "$<TARGET_FILE:run_http_client_demo>"
+      "$<TARGET_FILE:run_subscriptions_demo>" "$<TARGET_FILE:run_oauth_resource_demo>")
+  set_tests_properties(demo_http_and_sse PROPERTIES TIMEOUT 35)
 endif()

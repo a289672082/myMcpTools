@@ -1,129 +1,72 @@
-# C++20 MCP examples
+# Standalone C++20 MCP demos (no command-line arguments)
 
-These examples use **cpp-httplib + jsoncons + OpenSSL** (no Boost). They use the public `mymcp` C++ SDK, and are built by default with CMake. All HTTP servers bind to `127.0.0.1`.
+Every file `run_xxxx_demo.cpp` defines `int run_xxxx_demo()` plus a zero-argument `int main()` that calls it. The corresponding CMake executable is **`run_xxxx_demo`** (Windows: `.exe`). Each demo focuses on one feature; no `--http`, `--stdio`, URL, port or credential command-line options are used.
 
-> **Scope:** The sample programs exercise the SDK's currently implemented MCP `2026-07-28` subset. They do not imply full specification conformance. `oauth_resource_server` intentionally uses a **development-only** shared token, not a production OAuth verifier.
+Build once:
 
-## Build and test
-
-```sh
+```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build --parallel 2
 ctest --test-dir build --output-on-failure
 ```
 
-On Windows (Visual Studio), add `--config Debug` to `cmake --build` and `-C Debug` to `ctest`, and use executables from `build/Debug/`. Dependencies are downloaded via CMake's pinned FetchContent revisions on the first configure.
+For Visual Studio multi-config builds, add `--config Debug` to the build command, and `-C Debug` to `ctest`. Run demo executables from your build output directory. Most demos complete on their own; the three servers are designed to keep listening until terminated.
 
-## Feature coverage
+## One executable = one feature
 
-| Feature | Example |
-| --- | --- |
-| Tools with automatic input Schema, typed argument extraction | `showcase_server`, `showcase_client` (`add`, `hello`) |
-| Explicit JSON Schema input constraints | `showcase_server` (`rate`) |
-| Tool discovery with paginated listing and caching hints | `showcase_client` (`list_all`) |
-| Resources, URI templates | `showcase_server` (`demo://status`, `demo://notes/{id}`) |
-| Prompts with arguments, completions | `showcase_server` (`review`) |
-| Progress notifications and cooperative cancellation | `showcase_server` (`count`), `showcase_client` (stdio) |
-| MRTR `input_required` + client-supplied responses | `showcase_server` (`confirm_release`), `showcase_client` |
-| Background Tasks extension, task polling | `showcase_server` (`generate_report`), `showcase_client` |
-| `subscriptions/listen` and SSE resource-update notifications | `showcase_subscribe` + `emit_update` tool |
-| Custom methods and extension capability advertisement | `showcase_server` (`example/echo`) |
-| OAuth discovery, PKCE S256, dynamic registration, browser callback, token exchange and refresh | `oauth_login` (requires a real provider) |
-| OAuth Protected Resource Metadata, Bearer enforcement callback | `oauth_resource_server` (DEVELOPMENT ONLY) |
+| Run directly | What it demonstrates | Prerequisite |
+| --- | --- | --- |
+| `run_tools_demo` | Typed tools, auto JSON Schema, validation errors, pagination, discovery | None |
+| `run_resources_demo` | Static resources, templates, cached resource lists | None |
+| `run_prompts_demo` | Prompt arguments and completion | None |
+| `run_mrtr_demo` | Multi round-trip user elicitation on a harmless mock approval | None |
+| `run_tasks_demo` | Task creation, async execution and status polling | None |
+| `run_extensions_demo` | Extension capability and custom method | None |
+| `run_stdio_client_demo` | Launch `run_stdio_server_demo`, discover and call a tool over stdio | Automatically finds its companion executable |
+| `run_stdio_server_demo` | Stdio MCP server reading JSON-RPC from stdin | Started by stdio client (or host application) |
+| `run_http_server_demo` | Loopback HTTP server, tools, resources and publishing | Leave running in terminal 1 |
+| `run_http_client_demo` | HTTP MCP client requests | Run HTTP server first |
+| `run_subscriptions_demo` | SSE subscription, acknowledgement and resource-update event | Run HTTP server first |
+| `run_oauth_demo` | **No-credential mock OAuth**: discovery, native registration, PKCE S256, callback, token exchange | None |
+| `run_oauth_login_demo` | Real OAuth server with browser callback and bearer-protected MCP calls | Edit config in source, use a real OAuth provider |
+| `run_oauth_resource_demo` | Protected Resource Metadata, 401 challenge, local-only fixed demo Bearer verifier | Leave running in terminal; **development only** |
 
-## 1. All-in-one stdio example
+### Start two HTTP examples with no arguments
 
-Run from the build output directory (Windows: use `.exe`):
+Terminal 1:
 
-```sh
-./mymcp_showcase_client --stdio ./mymcp_showcase_server
+```bash
+./run_http_server_demo
 ```
 
-The client launches the server itself, discovers capabilities, enumerates all paginated tools, calls typed tools, reads resources, gets prompts and completions, handles a non-destructive MRTR approval request, reports stdio progress, and polls a Task until completed. It prints `SHOWCASE_OK` when finished.
+Terminal 2:
 
-`showcase_client` automatically approves its **example-only** `confirm_release` tool. In real applications, get explicit human approval rather than automatically accepting elicitation requests.
-
-## 2. HTTP and SSE examples
-
-In terminal A:
-
-```sh
-./mymcp_showcase_server --http 3000
+```bash
+./run_http_client_demo
+./run_subscriptions_demo
 ```
 
-In terminal B:
+The fixed local address/port is defined in `demo_common.hpp` (`http://127.0.0.1:33867/mcp`). Change that header to use another port; both server and clients will share it.
 
-```sh
-./mymcp_showcase_client --http http://127.0.0.1:3000/mcp
-./mymcp_showcase_subscribe http://127.0.0.1:3000/mcp
-```
+### OAuth walkthrough
 
-The SSE example subscribes to `demo://status`, receives the acknowledgement, invokes `emit_update` through a separate client, receives `notifications/resources/updated`, and closes the stream. `showcase_subscribe` exits with `SUBSCRIPTION_OK` on success.
+Try `./run_oauth_demo` **first**. It starts an in-memory mock authorization server on a random loopback port, then runs protected resource metadata discovery, native dynamic registration, PKCE S256 construction, validates a simulated OAuth callback and exchanges the code. It needs **no real credentials** and does not present a real authorization UI.
 
-**Current limitation:** progress notifications are shown through stdio only; HTTP request-level SSE progress support is not complete. Subscription SSE and regular HTTP RPC are supported by this example.
-
-## 3. OAuth client: authorization code + PKCE (real provider)
-
-This example is for a **real OAuth 2.1 authorization server**, not the fixed-token demo resource server. The endpoint must expose OAuth Protected Resource Metadata (RFC 9728), authorization-server discovery (RFC 8414 or OIDC), and authorize/token endpoints.
-
-```sh
-# Option A: pre-registered native client ID
-./mymcp_oauth_login https://mcp.example.com/mcp --client-id YOUR_PUBLIC_CLIENT_ID --scope tools:read
-
-# Option B: dynamic client registration (only if provider advertises RFC 7591)
-./mymcp_oauth_login https://mcp.example.com/mcp --register --scope tools:read
-```
-
-The example performs:
-
-1. Protected Resource Metadata and authorization-server metadata discovery, validating the expected issuer.
-2. Loopback callback listener on an OS-allocated `127.0.0.1` port and, if selected, dynamic native-client registration.
-3. PKCE S256 + CSRF `state` + OAuth `resource` indicator construction.
-4. Displays the authorization URL for you to open in a browser; receives the browser redirect locally for up to 180 seconds.
-5. Validates redirect, `state` and `iss`, exchanges the code, and obtains an in-memory Token.
-6. Uses `Client::http_oauth(...)` to discover tools; the session attaches and refreshes Bearer tokens as needed.
-
-**Important:** For a *pre-registered* client ID, your authorization server must permit the OS-selected local loopback redirect port; otherwise use an appropriate pre-registered redirect strategy or the dynamic registration option. This sample does not persist credentials, does not automate scope escalation, and intentionally does not print tokens or PKCE verifiers. The browser still needs to be opened by the user.
-
-### OAuth helper API (when your app has its own callback UI)
+For a **real** provider, edit the `configuration` constants at the top of `run_oauth_login_demo.cpp`:
 
 ```cpp
-#include "mymcp/mcp.hpp"
-#include "mymcp/oauth_client.hpp"
-
-auto session = std::make_shared<mymcp::oauth::Session>("https://mcp.example.com/mcp");
-session->discover();
-session->client_id("your-public-client-id");
-auto flow = session->begin_authorization("http://127.0.0.1:8765/callback", {"tools:read"});
-// Open flow.url using your application's UI. Receive the full callback URL.
-session->exchange_callback_url(flow, callback_url, "http://127.0.0.1:8765/callback");
-auto client = mymcp::Client::http_oauth("https://mcp.example.com/mcp", session);
-auto tools = client.tools();
+constexpr const char* mcp_resource = "https://your-mcp-host.example/mcp";
+constexpr const char* public_client_id = "YOUR_PUBLIC_CLIENT_ID";
+constexpr bool use_dynamic_registration = false;
+constexpr const char* requested_scope = "tools:read";
 ```
 
-The snippet assumes `callback_url` is supplied by your host application.
+Then rebuild and run `./run_oauth_login_demo`. It opens a local callback listener on an OS-selected port, prints an authorization URL for you to open, waits up to 180 seconds, validates callback state and issuer, exchanges the code and calls MCP with the OAuth session. No tokens are printed or saved; do not commit actual private credentials. The OAuth provider must allow the selected loopback redirect URI or support native dynamic registration.
 
-## 4. Protected MCP resource server (DEVELOPMENT ONLY)
+`run_oauth_resource_demo` is **not an OAuth authorization server** and cannot be used to log in with `run_oauth_login_demo`. It demonstrates only the SDK's protected-resource metadata and Bearer validation hook. Its fixed token is for local security-shape testing, **not a production token verifier**. In real services, verify token signature/introspection, issuer, audience, expiry and scopes; deploy with HTTPS.
 
-This tests SDK Protected Resource Metadata + Bearer challenge/verification hook:
+## Legacy integration test fixtures
 
-```sh
-# Do not use a real password or production OAuth token for this test.
-export MYMCP_DEMO_TOKEN=local-example-secret
-./mymcp_oauth_resource_server https://auth.example.com 3100
-```
+The previous command-line-driven `showcase_*`, `oauth_login.cpp` and `oauth_resource_server.cpp` files have moved to `tests/fixtures/` to keep existing integration tests without exposing old parameter-driven examples. They are compiled only as test fixtures. All files in `examples/` now use the independent `run_xxxx_demo` entrypoint convention.
 
-Windows PowerShell:
-
-```powershell
-$env:MYMCP_DEMO_TOKEN = "local-example-secret"
-.\mymcp_oauth_resource_server.exe https://auth.example.com 3100
-```
-
-Protected resource metadata is available at `http://127.0.0.1:3100/.well-known/oauth-protected-resource`. Requests to `/mcp` require `Authorization: Bearer local-example-secret`; wrong or missing tokens receive HTTP 401. The issuer URL here is illustrative; **this server will not issue OAuth authorization codes or validate JWTs**. It is not intended to work as the authorization server for the `oauth_login` example.
-
-**For production:** Replace the fixed-token comparison with trusted JWT/JWKS verification or OAuth introspection: validate signature, `iss`, resource/audience, expiration, token purpose and operation-specific scopes. Serve behind HTTPS, and provide a real identity provider. The verifier callback receives `(token, method, name)` for authorization decisions; see `SECURITY.md`.
-
-## 5. Repeatable tests
-
-`ctest` includes `showcase_examples` (stdio, HTTP, SSE) and `oauth_resource_example` (metadata, 401, permitted Bearer request). `oauth_session` tests a local mock authorization server for code exchange, callback checks and token refresh. No live external OAuth provider or secrets are required for CI.
+The SDK is still experimental; these demos do **not** establish full MCP 2026-07-28 conformance. See [`COMPATIBILITY.md`](../COMPATIBILITY.md).

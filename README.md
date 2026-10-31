@@ -41,13 +41,9 @@ For an HTTP client:
 auto client = mymcp::Client::http("http://127.0.0.1:3000/mcp");
 ```
 
-## Executable feature and OAuth examples
+## Standalone no-argument demos
 
-See **[examples/README.md](examples/README.md)** for a runnable tutorial covering typed tools, Schema validation, resources, URI templates, prompts, completion, paginated discovery, MRTR, Tasks, progress, stdio, HTTP, SSE subscriptions, and OAuth authorization/login.
-
-- `mymcp_showcase_server`, `mymcp_showcase_client`, `mymcp_showcase_subscribe`: runnable local MCP feature walkthrough.
-- `mymcp_oauth_login`: real authorization-code + PKCE example with loopback browser callback and in-memory tokens (requires an external OAuth provider).
-- `mymcp_oauth_resource_server`: **development-only** protected MCP server and Bearer callback; not a production JWT/OAuth verifier.
+See **[examples/README.md](examples/README.md)**. Every demonstration is a standalone executable named `run_xxxx_demo`, containing a matching `run_xxxx_demo()` function and a zero-argument `main()`. Examples include `run_tools_demo`, `run_resources_demo`, `run_prompts_demo`, `run_tasks_demo`, `run_mrtr_demo`, `run_stdio_client_demo` and `run_oauth_demo` (local mock OAuth). The old CLI-driven examples are retained only as integration test fixtures in `tests/fixtures/`.
 
 ## Build
 
@@ -59,15 +55,15 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Run the server and client from the `build` directory:
+Run from the build output directory (Windows: add `.exe`):
 
-```bash
-./mymcp_example_client
-./mymcp_example_server --http   # in another terminal
-./mymcp_example_client http://127.0.0.1:3000/mcp
+```sh
+./run_tools_demo
+./run_resources_demo
+./run_oauth_demo  # local, no external credentials
 ```
 
-On Windows use the `.exe` variants (and adjust the child executable path in the example). The HTTP server accepts an optional port: `--http 4000`.
+To exercise HTTP and SSE, run `run_http_server_demo` in one terminal, then `run_http_client_demo` and `run_subscriptions_demo` in another. Nothing requires command-line parameters.
 
 ## Protocol coverage — October 2026
 
@@ -152,7 +148,7 @@ The server task registry is process-local, **not durable across restarts**. HTTP
 
 A stdio server may report progress from inside an active tool handler using `server.progress(value, total, "message")`, and honor cancellation using `server.is_cancelled()`; the client can use `request_with_progress` and a `Client::process` notification callback. HTTP request-scoped progress is not yet implemented.
 
-For protected HTTP, `server.protect_http(protected_resource_metadata, token_verifier)` installs the metadata endpoint and authorization callback. The verifier must validate issuer, audience, expiry and required scopes. The example server's `--http-auth` is only a local integration test using the `MYMCP_TEST_TOKEN` environment variable. `Client::http("https://host/mcp", token)` validates TLS certificates/hostnames and includes a Bearer token. `mymcp/oauth_client.hpp` provides OAuth metadata discovery, PKCE S256, registration, token exchange and refresh. It does **not** independently implement interactive browser login or durable token storage.
+For protected HTTP, `server.protect_http(protected_resource_metadata, token_verifier)` installs the metadata endpoint and authorization callback. The verifier must validate issuer, audience, expiry and required scopes. The test fixture server supports a local-only authentication test using `MYMCP_TEST_TOKEN`; new no-argument demo programs live in `examples/`. `Client::http("https://host/mcp", token)` validates TLS certificates/hostnames and includes a Bearer token. `mymcp/oauth_client.hpp` provides OAuth metadata discovery, PKCE S256, registration, token exchange and refresh. It does **not** independently implement interactive browser login or durable token storage.
 
 All raw tool handlers are checked with jsoncons JSON Schema validation (see `include/mymcp/schema.hpp`). Schema violations return JSON-RPC `-32602`, not tool `isError`. Remote schema reference handling and official MCP conformance testing remain outstanding. See [COMPATIBILITY.md](COMPATIBILITY.md) and [SECURITY.md](SECURITY.md).
 
@@ -208,3 +204,23 @@ which is required for interoperability with some OpenID Connect servers. Web app
 can pass `"web"` explicitly to `register_dynamic(redirects, name, "web")`.
 The host application still owns browser navigation, redirect listener and safe
 credential storage; this is **not** a built-in authorization server.
+
+## Independent, no-argument demos
+
+`examples/` now contains single-purpose programs named `run_xxxx_demo.cpp`,
+each with `run_xxxx_demo()` and a zero-argument `main()`. For example:
+
+```sh
+./run_tools_demo
+./run_resources_demo
+./run_prompts_demo
+./run_tasks_demo
+./run_mrtr_demo
+./run_oauth_demo             # local mock provider, no credentials
+```
+
+For HTTP and SSE, launch `run_http_server_demo` in another terminal, then run
+`run_http_client_demo` or `run_subscriptions_demo`. For a real provider, edit the
+configuration constants in `examples/run_oauth_login_demo.cpp` and run it.
+See [the demo guide](examples/README.md). Old parameterized executables are
+retained only in `tests/fixtures/` for regression testing.
