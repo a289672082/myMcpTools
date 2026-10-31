@@ -47,7 +47,7 @@ See **[examples/README.md](examples/README.md)**. Every demonstration is a stand
 
 ## Build
 
-Requirements (migration): C++20, CMake >= 3.20, OpenSSL, Threads, and a network connection for CMake to fetch pinned cpp-httplib and jsoncons sources. No Boost dependency.
+Requirements (migration): C++20, CMake >= 3.20, OpenSSL, Threads, and the checked-in third-party sources (`third_party/jsoncons` and `third_party/cpp-httplib`). Configuration and builds are offline by default. No Boost dependency; OpenSSL remains a system prerequisite.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
@@ -78,15 +78,15 @@ Implemented and covered by local tests:
 - MRTR `input_required` on valid operations, client-side callback and `requestState` round trips.
 - `subscriptions/listen`: stdio acknowledgement and cancellation, HTTP long-lived SSE with acknowledgement/keepalive, per-subscription filters and explicit `Server::publish(...)`, `Client::listen_http(...)`.
 - Custom method handler and extension-capability advertisement APIs.
-- Streamable HTTP POST routing/header verification, `x-mcp-header` projection, origin checks, loopback-only listener. Request-scoped SSE response consumption on the client; JSON responses on the server.
+- Streamable HTTP POST routing/header verification, `x-mcp-header` projection, origin checks, loopback-only listener. Request-scoped SSE progress/response streaming and incremental client event delivery; JSON is used for fast server responses.
 
 Still incomplete (important before production use):
 
 - Remote schema retrieval and schema-derived output validation, typed content types and URI template operators beyond simple variables. The JSON Schema validator now uses jsoncons with 2020-12 support for local schemas.
 - OAuth gaps: an in-app browser/callback listener, secure persistent token storage, automatic authorization retry and incremental scope escalation, Client ID Metadata validation, and built-in JWT/JWKS verification. The client has discovery + PKCE + token/refresh flows; the server offers a Bearer verifier callback. The HTTP server binds loopback only; use a trusted HTTPS proxy for remote deployment.
-- Legacy HTTP session/handshake compatibility, asynchronous request cancellation outside subscriptions, progress and log notifications, and custom timeout/retry configuration.
+- Full legacy HTTP sessions/GET notification channels, reliable disconnect cancellation of blocked handlers, log notifications, and custom timeout/retry configuration.
 - Complete Tasks / Apps / EMA extension implementations (raw custom method dispatch and namespaced capability advertisement are available, but **do not** imply extension conformance).
-- Request-scoped SSE output from tool handlers, full stdio asynchronous client subscription management, stream restart resilience, cross-platform concurrency load testing, full official SDK conformance/interop tests.
+- SSE replay/resumption and automatic stream restart, full stdio asynchronous client subscription management, cross-platform concurrency load testing, full official SDK conformance/interop tests.
 
 See [COMPATIBILITY.md](COMPATIBILITY.md) for a conservative per-feature matrix. Passing local tests is not an official compliance certificate.
 
@@ -146,7 +146,7 @@ auto state = client.get_task(std::string(handle.at("taskId").as_string()));
 
 The server task registry is process-local, **not durable across restarts**. HTTP tasks calls also validate the `Mcp-Name` header against `taskId`.
 
-A stdio server may report progress from inside an active tool handler using `server.progress(value, total, "message")`, and honor cancellation using `server.is_cancelled()`; the client can use `request_with_progress` and a `Client::process` notification callback. HTTP request-scoped progress is not yet implemented.
+A stdio server may report progress from inside an active tool handler using `server.progress(value, total, "message")`, and honor cancellation using `server.is_cancelled()`; the client can use `request_with_progress` and a `Client::process` notification callback. HTTP progress uses a request-scoped SSE response when `progressToken` is present; the SDK delivers these notifications incrementally, but cancellation of a blocked handler still depends on a failed SSE write.
 
 For protected HTTP, `server.protect_http(protected_resource_metadata, token_verifier)` installs the metadata endpoint and authorization callback. The verifier must validate issuer, audience, expiry and required scopes. The test fixture server supports a local-only authentication test using `MYMCP_TEST_TOKEN`; new no-argument demo programs live in `examples/`. `Client::http("https://host/mcp", token)` validates TLS certificates/hostnames and includes a Bearer token. `mymcp/oauth_client.hpp` provides OAuth metadata discovery, PKCE S256, registration, token exchange and refresh. It does **not** independently implement interactive browser login or durable token storage.
 
@@ -224,6 +224,32 @@ For HTTP and SSE, launch `run_http_server_demo` in another terminal, then run
 configuration constants in `examples/run_oauth_login_demo.cpp` and run it.
 See [the demo guide](examples/README.md). Old parameterized executables are
 retained only in `tests/fixtures/` for regression testing.
+
+
+## Codex / Claude Code and Streamable HTTP
+
+Use Streamable HTTP as the preferred network transport; **SSE is a response format inside it**, not a separate transport. The HTTP SDK now supports modern `2026-07-28` requests, a basic legacy Streamable HTTP adapter (2025-03-26 to 2025-11-25), and tool progress over request-scoped SSE. See [INTEROPERABILITY.md](INTEROPERABILITY.md) for connection commands, compatibility limits and security instructions.
+
+A tool can report progress without caring whether it runs on stdio or HTTP:
+
+```cpp
+server.add_tool("count", "Report progress", mymcp::json::object{{"type", "object"}},
+  [&server](const mymcp::Json&) -> mymcp::Json {
+    for (int i = 1; i <= 5 && !server.is_cancelled(); ++i) server.progress(i, 5, "Working");
+    return mymcp::detail::make_tool_result("done");
+  });
+```
+
+In an HTTP client, install a progress event callback and include a `progressToken`:
+
+```cpp
+auto client = mymcp::Client::http("http://127.0.0.1:3000/mcp", {},
+  [](const mymcp::Json& event) { /* handle notifications/progress */ });
+auto result = client.request_with_progress("tools/call",
+  mymcp::json::object{{"name", "count"}, {"arguments", mymcp::json::object{}}}, "my-token");
+```
+
+To run a complete no-argument client/server pair, start `run_http_server_demo`, then `run_http_progress_demo` in another terminal.
 
 ## All-in-one agent toolbox demo
 
