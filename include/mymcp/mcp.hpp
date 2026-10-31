@@ -125,7 +125,7 @@ public:
             return detail::make_tool_result(std::invoke(f, detail::get_arg<Ts>(values, arguments)...));
           }
         } catch (const std::exception& e) {
-          return json::object{{"content", json::array{{{"type", "text"}, {"text", e.what()}}}}, {"isError", true}};
+          return json::object{{"content", json::array{json::object{{"type", "text"}, {"text", e.what()}}}}, {"isError", true}};
         }
       });
   }
@@ -253,7 +253,7 @@ public:
   // The SDK retries the original request with inputResponses and the opaque requestState.
   void on_input_required(std::function<Json(const Json&)> handler) {
     input_handler_ = std::move(handler);
-    capabilities_["elicitation"] = {{"form", json::object{}}};
+    capabilities_["elicitation"] = json::object{{"form", json::object{}}};
   }
 private:
   std::function<Json(const Json&)> send_;

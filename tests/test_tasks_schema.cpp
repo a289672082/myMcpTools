@@ -9,15 +9,15 @@ using namespace mymcp;
 int main() {
   Json nested = { {"type", "object"}, {"required", json::array{"name", "count"}},
     {"additionalProperties", false}, {"properties", {
-      {"name", {{"type", "string"}, {"minLength", 2}, {"pattern", "^[A-Z]"}}},
-      {"count", {{"type", "integer"}, {"minimum", 1}, {"maximum", 5}}}}}};
+      {"name", json::object{{"type", "string"}, {"minLength", 2}, {"pattern", "^[A-Z]"}}},
+      {"count", json::object{{"type", "integer"}, {"minimum", 1}, {"maximum", 5}}}}}};
   std::string error;
-  CHECK(validate_schema(nested, {{"name", "Alpha"}, {"count", 3}}, &error));
-  CHECK(!validate_schema(nested, {{"name", "a"}, {"count", 3}}, &error));
+  CHECK(validate_schema(nested, json::object{{"name", "Alpha"}, {"count", 3}}, &error));
+  CHECK(!validate_schema(nested, json::object{{"name", "a"}, {"count", 3}}, &error));
   CHECK(error.find("/name") != std::string::npos);
-  CHECK(!validate_schema(nested, {{"name", "Alpha"}, {"count", 7}}, &error));
-  CHECK(!validate_schema(nested, {{"name", "Alpha"}, {"count", 3}, {"extra", 2}}, &error));
-  Json local_ref = json::object{{"$defs", {{"small", {{"type", "integer"}, {"maximum", 3}}}}},
+  CHECK(!validate_schema(nested, json::object{{"name", "Alpha"}, {"count", 7}}, &error));
+  CHECK(!validate_schema(nested, json::object{{"name", "Alpha"}, {"count", 3}, {"extra", 2}}, &error));
+  Json local_ref = json::object{{"$defs", json::object{{"small", json::object{{"type", "integer"}, {"maximum", 3}}}}},
                     {"$ref", "#/$defs/small"}};
   CHECK(validate_schema(local_ref, 2));
   CHECK(!validate_schema(local_ref, 10));
@@ -26,21 +26,21 @@ int main() {
   srv.add_tool("schema", "Validate", nested, [](const Json&) {
     return detail::make_tool_result("ok");
   });
-  srv.add_tool("background", "Run task", {{"type", "object"}}, [&](const Json&) -> Json {
+  srv.add_tool("background", "Run task", json::object{{"type", "object"}}, [&](const Json&) -> Json {
     return srv.start_task([](const Json& responses, std::atomic_bool& cancelled)->Json {
       if (cancelled.load()) return { {"content", json::array{}} };
       if (responses.is_null()) return {
         {"resultType", "input_required"},
-        {"inputRequests", {{"confirm", {{"method", "elicitation/create"},
-           {"params", {{"mode", "form"}, {"message", "Continue?"},
-             {"requestedSchema", {{"type", "object"}}}}}}}}} };
+        {"inputRequests", json::object{{"confirm", json::object{{"method", "elicitation/create"},
+           {"params", json::object{{"mode", "form"}, {"message", "Continue?"},
+             {"requestedSchema", json::object{{"type", "object"}}}}}}}}} };
       return detail::make_tool_result(responses.at("confirm"));
     }, 300000, 10);
   });
   Client cli([&](const Json& req) { return srv.handle(req); });
   cli.enable_tasks();
-  CHECK(cli.call("schema", {{"name", "Alpha"}, {"count", 2}}).at("resultType") == "complete");
-  try { cli.call("schema", {{"name", "A"}, {"count", 2}}); CHECK(false); }
+  CHECK(cli.call("schema", json::object{{"name", "Alpha"}, {"count", 2}}).at("resultType") == "complete");
+  try { cli.call("schema", json::object{{"name", "A"}, {"count", 2}}); CHECK(false); }
   catch (const Error& e) {CHECK(e.code == -32602);}
   auto task = cli.call("background");
   CHECK(task.at("resultType") == "task");
@@ -54,9 +54,9 @@ int main() {
   }
   CHECK(state.at("status") == "input_required");
   CHECK(state.at("inputRequests").contains("confirm"));
-  CHECK(cli.update_task(id, {{"not-known", "ignored"}}).at("resultType") == "complete");
+  CHECK(cli.update_task(id, json::object{{"not-known", "ignored"}}).at("resultType") == "complete");
   CHECK(cli.get_task(id).at("status") == "input_required");
-  CHECK(cli.update_task(id, {{"confirm", {{"action", "accept"}, {"content", {{"ok", true}}}}}}).at("resultType") == "complete");
+  CHECK(cli.update_task(id, json::object{{"confirm", json::object{{"action", "accept"}, {"content", json::object{{"ok", true}}}}}}).at("resultType") == "complete");
   for (int i=0;i<300;++i) {
     state = cli.get_task(id);
     if (state.at("status") == "completed") break;
@@ -66,7 +66,7 @@ int main() {
   CHECK(state.at("result").at("content")[0].at("text").is_string());
   CHECK(cli.cancel_task(id).at("resultType") == "complete");
   Client no_tasks([&](const Json& req){return srv.handle(req);});
-  try { no_tasks.request("tasks/get", {{"taskId",id}}); CHECK(false); }
+  try { no_tasks.request("tasks/get", json::object{{"taskId",id}}); CHECK(false); }
   catch (const Error& e) { CHECK(e.code == -32021); }
   try { cli.get_task("not-a-task"); CHECK(false); }
   catch (const Error& e) { CHECK(e.code == -32602); }

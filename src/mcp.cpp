@@ -8,6 +8,9 @@
 #include <httplib.h>
 #include <cstdio>
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX 1
+#endif
 #include <windows.h>
 #include <io.h>
 #include <fcntl.h>
@@ -42,7 +45,7 @@ std::string string_of(const Json& obj, std::string_view key, std::string fallbac
   return v.is_string() ? std::string(v.as_string()) : fallback;
 }
 Json rpc_error(Json id, int code, std::string message, Json data = nullptr) {
-  json::object e{{"code", code}, {"message", std::move(message)}};
+  json::object ejson::object{{"code", code}, {"message", std::move(message)}};
   if (!data.is_null()) e["data"] = std::move(data);
   return json::object{{"jsonrpc", "2.0"}, {"id", std::move(id)}, {"error", std::move(e)}};
 }
@@ -155,7 +158,7 @@ std::string header_value(const Json& v) {
   }
   throw Error(-32602, "Invalid HTTP mirrored parameter value");
 }
-void paginate_list(json::array& values, const Json& params, Json& result,
+void paginate_list(Json& values, const Json& params, Json& result,
                    const std::string& method, std::size_t page_size) {
   const std::size_t total = values.size();
   const Json& cursor = find(params, "cursor");
@@ -330,8 +333,8 @@ std::shared_ptr<Server::Subscription> Server::subscribe(Json id, Json filter) {
   sub->id = std::move(id);
   sub->notifications = std::move(accepted);
   // Acknowledgement is always queued before any other notification.
-  sub->messages.push_back({{"jsonrpc", "2.0"}, {"method", "notifications/subscriptions/acknowledged"},
-    {"params", {{"_meta", {{"io.modelcontextprotocol/subscriptionId", sub->id}}},
+  sub->messages.push_back(json::object{{"jsonrpc", "2.0"}, {"method", "notifications/subscriptions/acknowledged"},
+    {"params", json::object{{"_meta", json::object{{"io.modelcontextprotocol/subscriptionId", sub->id}}},
                 {"notifications", sub->notifications}}}});
   {
     std::lock_guard lock(subscriber_mutex_);
@@ -363,7 +366,7 @@ void Server::publish(const std::string& method, Json params) {
       if (entry.is_string() && entry.as_string() == uri) selected = true;
     if (!selected) continue;
     Json payload = params;
-    payload["_meta"] = {{"io.modelcontextprotocol/subscriptionId", sub->id}};
+    payload["_meta"] = json::object{{"io.modelcontextprotocol/subscriptionId", sub->id}};
     Json event = json::object{{"jsonrpc", "2.0"}, {"method", method}, {"params", std::move(payload)}};
     {
       std::lock_guard stream_lock(sub->mutex);
@@ -428,12 +431,12 @@ void Server::run_task(const std::shared_ptr<TaskState>& task, Json input_respons
     } catch (const Error& error) {
       std::lock_guard lock(task->mutex);
       task->details["status"] = "failed";
-      task->details["error"] = {{"code", error.code}, {"message", error.what()}};
+      task->details["error"] = json::object{{"code", error.code}, {"message", error.what()}};
       task->details["lastUpdatedAt"] = utc_now();
     } catch (const std::exception& error) {
       std::lock_guard lock(task->mutex);
       task->details["status"] = "failed";
-      task->details["error"] = {{"code", -32603}, {"message", error.what()}};
+      task->details["error"] = json::object{{"code", -32603}, {"message", error.what()}};
       task->details["lastUpdatedAt"] = utc_now();
     }
   }).detach();
@@ -449,7 +452,7 @@ Json Server::start_task(TaskHandler handler, std::uint64_t ttl_ms, std::uint64_t
   const auto timestamp = utc_now();
   task->handler = std::move(handler);
   task->expires_at = std::chrono::steady_clock::now() + std::chrono::milliseconds(ttl_ms);
-  task->details = {{"taskId", id}, {"status", "working"},
+  task->details = json::object{{"taskId", id}, {"status", "working"},
      {"createdAt", timestamp}, {"lastUpdatedAt", timestamp},
      {"ttlMs", ttl_ms}, {"pollIntervalMs", poll_ms}};
   {
@@ -525,8 +528,8 @@ Json Server::handle(const Json& req, bool allow_legacy) {
       if (offered != "2025-11-25" && offered != "2025-06-18" && offered != "2025-03-26")
         offered = LegacyProtocolVersion;
       Json caps = json::object{{"tools", json::object{}}, {"resources", json::object{}}, {"prompts", json::object{}}};
-      return rpc_success(id, {{"protocolVersion", offered}, {"capabilities", caps},
-                              {"serverInfo", {{"name", name_}, {"version", version_}}}});
+      return rpc_success(id, json::object{{"protocolVersion", offered}, {"capabilities", caps},
+                              {"serverInfo", json::object{{"name", name_}, {"version", version_}}}});
     }
     if (!modern && (!legacy_initialized_ || !allow_legacy)) throw Error(-32600, "Modern requests require per-request _meta");
     if (modern) {
@@ -540,12 +543,12 @@ Json Server::handle(const Json& req, bool allow_legacy) {
       auto version = string_of(meta, "io.modelcontextprotocol/protocolVersion");
       if (version != ProtocolVersion) {
         return rpc_error(id, -32022, "Unsupported protocol version",
-                         {{"requested", version}, {"supported", json::array{ProtocolVersion, LegacyProtocolVersion}}});
+                         json::object{{"requested", version}, {"supported", json::array{ProtocolVersion, LegacyProtocolVersion}}});
       }
     }
     if (method == "server/discover") {
       if (!modern) throw Error(-32601, "Method not found");
-      json::object capabilities{{"tools", json::object{}}, {"resources", json::object{}},
+      json::object capabilitiesjson::object{{"tools", json::object{}}, {"resources", json::object{}},
                                 {"prompts", json::object{}}};
       if (completion_) capabilities["completions"] = json::object{};
       if (!extensions_.empty()) capabilities["extensions"] = extensions_;
@@ -554,7 +557,7 @@ Json Server::handle(const Json& req, bool allow_legacy) {
       if (!instructions_.empty()) result["instructions"] = instructions_;
     } else if (method == "tools/list") {
       json::array list;
-      for (const auto& [name, tool] : tools_) list.push_back({{"name", name}, {"description", tool.description}, {"inputSchema", tool.schema}});
+      for (const auto& [name, tool] : tools_) list.push_back(json::object{{"name", name}, {"description", tool.description}, {"inputSchema", tool.schema}});
       result = json::object{{"tools", std::move(list)}};
       paginate_list(result.at("tools"), params, result, method, page_size_);
     } else if (method == "tools/call") {
@@ -641,7 +644,7 @@ Json Server::handle(const Json& req, bool allow_legacy) {
       }
     } else if (method == "resources/list") {
       json::array list;
-      for (const auto& [uri, res] : resources_) list.push_back({{"uri", uri}, {"name", res.name}, {"mimeType", res.mime}});
+      for (const auto& [uri, res] : resources_) list.push_back(json::object{{"uri", uri}, {"name", res.name}, {"mimeType", res.mime}});
       result = json::object{{"resources", std::move(list)}};
       paginate_list(result.at("resources"), params, result, method, page_size_);
     } else if (method == "resources/read") {
@@ -685,7 +688,7 @@ Json Server::handle(const Json& req, bool allow_legacy) {
       const Json& args = find(params, "arguments");
       const json::object values = args.is_object() ? args : json::object{};
       if (it->second.full_reader) result = it->second.full_reader(values);
-      else result = json::object{{"messages", json::array{json::object{{"role", "user"}, {"content", {{"type", "text"}, {"text", it->second.reader(values)}}}}}}};
+      else result = json::object{{"messages", json::array{json::object{{"role", "user"}, {"content", json::object{{"type", "text"}, {"text", it->second.reader(values)}}}}}}};
     } else if (method == "completion/complete" && completion_) {
       if (!params.is_object() || !find(params, "ref").is_object() || !find(params, "argument").is_object())
         throw Error(-32602, "Invalid completion request");
@@ -723,7 +726,7 @@ Json Server::handle(const Json& req, bool allow_legacy) {
     result = complete(std::move(result), modern);
     if (modern) {
       json::object meta_out = find(result, "_meta").is_object() ? find(result, "_meta") : json::object{};
-      meta_out["io.modelcontextprotocol/serverInfo"] = {{"name", name_}, {"version", version_}};
+      meta_out["io.modelcontextprotocol/serverInfo"] = json::object{{"name", name_}, {"version", version_}};
       result["_meta"] = std::move(meta_out);
       if (method == "server/discover" || method == "tools/list" || method == "prompts/list" ||
           method == "resources/list" || method == "resources/templates/list" || method == "resources/read") {
@@ -766,7 +769,7 @@ void Server::progress(double value, std::optional<double> total, std::string mes
     Json params = json::object{{"progressToken", ctx->token}, {"progress", value}};
     if (total) params["total"] = *total;
     if (!message.empty()) params["message"] = std::move(message);
-    event = {{"jsonrpc", "2.0"}, {"method", "notifications/progress"}, {"params", std::move(params)}};
+    event = json::object{{"jsonrpc", "2.0"}, {"method", "notifications/progress"}, {"params", std::move(params)}};
   }
   if (!ctx->cancelled.load()) ctx->emit(event);
 }
@@ -913,7 +916,7 @@ HttpReply on_http(Server& server, const httplib::Request& req,
     return {400, rpc_error(id, -32020, "HeaderMismatch: version or method"), {}};
   if (ver != ProtocolVersion)
     return {400, rpc_error(id, -32022, "Unsupported protocol version",
-             { {"requested", ver}, {"supported", json::array{ProtocolVersion}} }), {}};
+             json::object{{"requested", ver}, {"supported", json::array{ProtocolVersion}} }), {}};
   if (method == "tools/call" || method == "resources/read" || method == "prompts/get" ||
       method == "tasks/get" || method == "tasks/update" || method == "tasks/cancel") {
     const std::string expected = string_of(params, method == "resources/read" ? "uri" :
@@ -1090,7 +1093,7 @@ ParsedUrl parse_url(const std::string& url) {
   auto at=url.find("://");
   if(at==std::string::npos || (url.substr(0,at)!="http" && url.substr(0,at)!="https"))
     throw std::invalid_argument("Invalid HTTP(S) URL");
-  auto scheme=url.substr(0,at), from=at+3;
+  auto scheme=url.substr(0,at); auto from=at+3;
   auto end=url.find_first_of("/?#",from);
   auto authority=url.substr(from,end==std::string::npos?end:end-from);
   if(authority.empty()||authority.find('@')!=std::string::npos)throw std::invalid_argument("Invalid URL authority");
@@ -1118,7 +1121,7 @@ struct HttpState {
     std::lock_guard lock(mutex);
     const auto method=string_of(msg,"method");
     const Json& params=find(msg,"params");
-    httplib::Headers headers{{"Accept","application/json, text/event-stream"},
+    httplib::Headers headersjson::object{{"Accept","application/json, text/event-stream"},
         {"MCP-Protocol-Version",ProtocolVersion},{"Mcp-Method",method}};
     const std::string bearer = oauth_session ? oauth_session->bearer_token() : token;
     if(!bearer.empty())headers.emplace("Authorization","Bearer "+bearer);
@@ -1160,7 +1163,7 @@ void Client::listen_http(const std::string& url, Json notifications,
          {"io.modelcontextprotocol/clientInfo",json::object{{"name","mymcp-listener"},{"version","1.0"}}}}}}}};
   auto c=new_http_client(target);
   c->set_read_timeout(3600,0);
-  httplib::Headers headers{{"Accept","application/json, text/event-stream"},
+  httplib::Headers headersjson::object{{"Accept","application/json, text/event-stream"},
     {"MCP-Protocol-Version",ProtocolVersion},{"Mcp-Method","subscriptions/listen"}};
   std::string pending;
   bool continue_reading=true;
@@ -1216,7 +1219,7 @@ Json Client::request(const std::string& method, Json params) {
                               find(actual_params, "_meta") : json::object{};
       metadata["io.modelcontextprotocol/protocolVersion"] = ProtocolVersion;
       metadata["io.modelcontextprotocol/clientCapabilities"] = capabilities_;
-      metadata["io.modelcontextprotocol/clientInfo"] = {{"name", name_}, {"version", "1.0.0"}};
+      metadata["io.modelcontextprotocol/clientInfo"] = json::object{{"name", name_}, {"version", "1.0.0"}};
       actual_params["_meta"] = std::move(metadata);
     }
     Json message = json::object{{"jsonrpc", "2.0"}, {"id", next_id_++}, {"method", method}, {"params", std::move(actual_params)}};
@@ -1268,8 +1271,8 @@ Json Client::discover() {
   }
   // stdio fallback for pre-2026 servers. Never negotiate modern versions in initialize.
   legacy_ = true;
-  Json init = request("initialize", {{"protocolVersion", LegacyProtocolVersion},
-                                     {"clientInfo", {{"name", name_}, {"version", "1.0.0"}}},
+  Json init = request("initialize", json::object{{"protocolVersion", LegacyProtocolVersion},
+                                     {"clientInfo", json::object{{"name", name_}, {"version", "1.0.0"}}},
                                      {"capabilities", json::object{}}});
   connected_ = true;
   discovery_ = init;
@@ -1281,21 +1284,21 @@ Json Client::discover() {
 Json Client::tools() { return request("tools/list"); }
 Json Client::call(const std::string& name, Json arguments) {
   if (http_ && !tools_known_) list_all("tools/list", "tools"); // discover paginated header annotations
-  return request("tools/call", {{"name", name}, {"arguments", std::move(arguments)}});
+  return request("tools/call", json::object{{"name", name}, {"arguments", std::move(arguments)}});
 }
 Json Client::resources() { return request("resources/list"); }
-Json Client::read(const std::string& uri) { return request("resources/read", {{"uri", uri}}); }
+Json Client::read(const std::string& uri) { return request("resources/read", json::object{{"uri", uri}}); }
 Json Client::prompts() { return request("prompts/list"); }
 Json Client::resource_templates() { return request("resources/templates/list"); }
 void Client::enable_tasks() { extension("io.modelcontextprotocol/tasks"); }
-Json Client::get_task(const std::string& id) { return request("tasks/get", {{"taskId", id}}); }
+Json Client::get_task(const std::string& id) { return request("tasks/get", json::object{{"taskId", id}}); }
 Json Client::update_task(const std::string& id, Json responses) {
-  return request("tasks/update", {{"taskId", id}, {"inputResponses", std::move(responses)}});
+  return request("tasks/update", json::object{{"taskId", id}, {"inputResponses", std::move(responses)}});
 }
-Json Client::cancel_task(const std::string& id) { return request("tasks/cancel", {{"taskId", id}}); }
+Json Client::cancel_task(const std::string& id) { return request("tasks/cancel", json::object{{"taskId", id}}); }
 Json Client::complete(Json ref, std::string name, std::string value, Json context) {
-  return request("completion/complete", {{"ref", std::move(ref)},
-         {"argument", {{"name", name}, {"value", value}}}, {"context", std::move(context)}});
+  return request("completion/complete", json::object{{"ref", std::move(ref)},
+         {"argument", json::object{{"name", name}, {"value", value}}}, {"context", std::move(context)}});
 }
 void Client::extension(std::string name, Json settings) {
   if (connected_) throw std::logic_error("Extensions must be configured before discovery");
@@ -1319,11 +1322,11 @@ Json Client::list_all(const std::string& method, const std::string& array_field)
     if (!next.is_string()) throw Error(-32603, "Invalid nextCursor");
     const std::string cursor(next.as_string());
     if (!visited.insert(cursor).second) throw Error(-32603, "Pagination loop detected");
-    params = {{"cursor", cursor}};
+    params = json::object{{"cursor", cursor}};
   }
   throw Error(-32603, "Too many list pages");
 }
 Json Client::get_prompt(const std::string& name, Json arguments) {
-  return request("prompts/get", {{"name", name}, {"arguments", std::move(arguments)}});
+  return request("prompts/get", json::object{{"name", name}, {"arguments", std::move(arguments)}});
 }
 } // namespace mymcp

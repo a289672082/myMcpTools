@@ -178,7 +178,7 @@ Token Session::exchange_code(const Authorization& flow,const std::string& code,
   validate_callback(flow,state,issuer);
   if(code.empty()||redirect!=redirect_uri_)throw std::invalid_argument("Invalid OAuth authorization callback");
   if(flow.expected_issuer!=metadata_.issuer)throw std::runtime_error("OAuth issuer changed");
-  httplib::Params p{{"grant_type","authorization_code"},{"code",code},{"redirect_uri",redirect},
+  httplib::Params pjson::object{{"grant_type","authorization_code"},{"code",code},{"redirect_uri",redirect},
     {"client_id",client_id_},{"code_verifier",flow.code_verifier},{"resource",resource_url_}};
   auto t=parse_token(post_form(metadata_.token_endpoint,p));
   {std::lock_guard lock(mutex_);token_=t;token_available_=true;}
@@ -187,7 +187,7 @@ Token Session::exchange_code(const Authorization& flow,const std::string& code,
 Token Session::refresh(){
   std::lock_guard lock(mutex_);
   if(!token_available_||token_.refresh_token.empty())throw std::runtime_error("No OAuth refresh token available");
-  httplib::Params p{{"grant_type","refresh_token"},{"refresh_token",token_.refresh_token},
+  httplib::Params pjson::object{{"grant_type","refresh_token"},{"refresh_token",token_.refresh_token},
     {"client_id",client_id_},{"resource",resource_url_}};
   Token updated=parse_token(post_form(metadata_.token_endpoint,p),token_.refresh_token);
   token_=updated;return updated;
