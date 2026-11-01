@@ -218,6 +218,14 @@ private:
   bool legacy_initialized_ = false;
 };
 
+// 每次 MCP 请求的资源约束。0 表示使用 SDK 默认值（超时 0 为不设截止时间）。
+// Cancel callback 必须能安全地由调用线程读取；不可信进程建议使用 process() 隔离。
+struct RequestOptions {
+  std::chrono::milliseconds timeout{0};
+  std::size_t max_response_bytes = 0;
+  std::function<bool()> cancelled;
+};
+
 class Client {
 public:
   explicit Client(std::function<Json(const Json&)> send, std::string name = "mymcp-client");
@@ -234,11 +242,13 @@ public:
   // Blocks while a long-lived HTTP subscription is open. Return false to disconnect.
   static void listen_http(const std::string& url, Json notifications,
                           std::function<bool(const Json&)> on_event);
-  Json discover();
-  Json request(const std::string& method, Json params = json::object{});
+  Json discover(const RequestOptions& options = {});
+  Json request(const std::string& method, Json params = json::object{},
+               const RequestOptions& options = {});
   Json request_with_progress(const std::string& method, Json params, Json progress_token);
   Json tools();
-  Json call(const std::string& name, Json arguments = json::object{});
+  Json call(const std::string& name, Json arguments = json::object{},
+            const RequestOptions& options = {});
   Json resources();
   Json read(const std::string& uri);
   Json prompts();
@@ -261,6 +271,7 @@ public:
   }
 private:
   std::function<Json(const Json&)> send_;
+  std::function<Json(const Json&, const RequestOptions&)> send_bounded_;
   std::string name_;
   long long next_id_ = 1;
   Json capabilities_ = json::object{};
