@@ -1318,8 +1318,16 @@ struct HttpState {
   std::shared_ptr<oauth::Session> oauth_session;
   std::function<void(const Json&)> on_notification;
   explicit HttpState(const std::string& path,std::string bearer):url(parse_url(path)),token(std::move(bearer)){}
-  Json send(const Json& msg) {
+  Json send(const Json& msg, const RequestOptions& options = {}) {
     std::lock_guard lock(mutex);
+    const auto deadline=options.timeout.count()>0
+      ? std::chrono::steady_clock::now()+options.timeout
+      : std::chrono::steady_clock::time_point::max();
+    const auto expired=[&] {
+      return (options.cancelled && options.cancelled()) ||
+             std::chrono::steady_clock::now()>=deadline;
+    };
+    if(expired())throw std::runtime_error("MCP HTTP request cancelled or timed out");
     const auto method=string_of(msg,"method");
     const Json& params=find(msg,"params");
     httplib::Headers headers{{"Accept","application/json, text/event-stream"}};
@@ -1343,18 +1351,45 @@ struct HttpState {
       }
     }
     auto c=new_http_client(url);
+    if(options.timeout.count()>0) {
+      const auto bound=std::max(std::chrono::milliseconds(1),options.timeout);
+      const auto connection=std::min(bound,std::chrono::seconds(5));
+      const auto to_times=[](std::chrono::milliseconds time) {
+        return std::pair<time_t,time_t>{static_cast<time_t>(time.count()/1000),
+                                        static_cast<time_t>((time.count()%1000)*1000)};
+      };
+      const auto [cs,cu]=to_times(connection);
+      const auto [rs,ru]=to_times(std::min(bound,std::chrono::seconds(30)));
+      c->set_connection_timeout(cs,cu);
+      c->set_read_timeout(rs,ru);
+      c->set_write_timeout(rs,ru);
+    }
     // Read SSE progressively rather than buffering the response body until
     // completion. A progress notification can now reach the app immediately.
     std::string pending;
     std::string decode_error;
+    std::size_t received_total=0;
+    // Limit individual frames and the overall response when a caller
+    // supplies a tighter transport budget.
+    const auto frame_limit=options.max_response_bytes
+        ? std::min(options.max_response_bytes,std::size_t{4}*1024*1024)
+        : std::size_t{4}*1024*1024;
     Json streamed_result = nullptr;
     auto response=c->Post(url.target, headers, json::serialize(msg), "application/json",
       [&](const char* data, std::size_t length) -> bool {
-        pending.append(data, length);
-        if (pending.size() > 4 * 1024 * 1024) {
-          decode_error = "HTTP response/SSE frame too large";
+        if(expired()) {
+          decode_error="MCP HTTP request cancelled or timed out";
           return false;
         }
+        if(length>frame_limit || pending.size()>frame_limit-length ||
+           (options.max_response_bytes &&
+            (received_total>options.max_response_bytes ||
+             length>options.max_response_bytes-received_total))) {
+          decode_error="HTTP response/SSE frame too large";
+          return false;
+        }
+        received_total+=length;
+        pending.append(data,length);
         for (;;) {
           auto end = pending.find("\n\n");
           if (end == std::string::npos) break;
@@ -1386,6 +1421,7 @@ struct HttpState {
         return true;
       });
     if (!decode_error.empty()) throw std::runtime_error(decode_error);
+    if(expired())throw std::runtime_error("MCP HTTP request cancelled or timed out");
     if(!response)throw std::runtime_error("HTTP transport error: "+httplib::to_string(response.error()));
     if(response->status==202)return nullptr;
     if(response->get_header_value("Content-Type").starts_with("text/event-stream")){
@@ -1436,13 +1472,20 @@ Client::Client(std::function<Json(const Json&)> send, std::string name)
 Client Client::process(const std::string& executable, std::vector<std::string> args,
                        std::function<void(const Json&)> on_notification) {
   auto state = std::make_shared<ProcessState>(executable, args, std::move(on_notification));
-  return Client([state](const Json& message){ return state->send(message); });
+  Client client([state](const Json& message){ return state->send(message); });
+  client.send_bounded_=[state](const Json& message,const RequestOptions& options) {
+    return state->send(message,options);
+  };
+  return client;
 }
 Client Client::http(const std::string& url, std::string bearer_token,
                     std::function<void(const Json&)> on_notification) {
   auto state = std::make_shared<HttpState>(url, std::move(bearer_token));
   state->on_notification = std::move(on_notification);
   Client client([state](const Json& message){ return state->send(message); });
+  client.send_bounded_=[state](const Json& message,const RequestOptions& options) {
+    return state->send(message,options);
+  };
   client.http_ = true;
   return client;
 }
@@ -1453,12 +1496,33 @@ Client Client::http_oauth(const std::string& url, std::shared_ptr<oauth::Session
   state->oauth_session = std::move(session);
   state->on_notification = std::move(on_notification);
   Client client([state](const Json& message){ return state->send(message); });
+  client.send_bounded_=[state](const Json& message,const RequestOptions& options) {
+    return state->send(message,options);
+  };
   client.http_ = true;
   return client;
 }
-Json Client::request(const std::string& method, Json params) {
+Json Client::request(const std::string& method, Json params,
+                     const RequestOptions& options) {
   if (!params.is_object()) throw std::invalid_argument("Request params must be an object");
-  if (!connected_ && method != "server/discover" && method != "initialize") discover();
+  const auto deadline=options.timeout.count()>0
+      ? std::chrono::steady_clock::now()+options.timeout
+      : std::chrono::steady_clock::time_point::max();
+  const auto budget=[&]() {
+    if(options.cancelled && options.cancelled())
+      throw std::runtime_error("MCP request cancelled");
+    RequestOptions next=options;
+    if(deadline!=std::chrono::steady_clock::time_point::max()) {
+      if(std::chrono::steady_clock::now()>=deadline)
+        throw std::runtime_error("MCP request deadline exceeded");
+      next.timeout=std::max(std::chrono::milliseconds{1},
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+          deadline-std::chrono::steady_clock::now()));
+    }
+    return next;
+  };
+  if (!connected_ && method != "server/discover" && method != "initialize")
+    discover(budget());
   for (int round = 0; round < 9; ++round) {
     Json actual_params = params;
     if (!legacy_) {
@@ -1470,7 +1534,12 @@ Json Client::request(const std::string& method, Json params) {
       actual_params["_meta"] = std::move(metadata);
     }
     Json message = json::object{{"jsonrpc", "2.0"}, {"id", next_id_++}, {"method", method}, {"params", std::move(actual_params)}};
-    Json response = send_(message);
+    const auto request_options=budget();
+    Json response=send_bounded_ ? send_bounded_(message,request_options)
+                                : send_(message);
+    // A custom in-process sender cannot be forcibly interrupted. Still
+    // report expiration if it returned after the requested deadline.
+    (void)budget();
     if (!response.is_object()) throw std::runtime_error("Invalid JSON-RPC response");
     if (find(response, "id") != find(message, "id")) throw std::runtime_error("JSON-RPC response ID mismatch");
     const Json& e = find(response, "error");
@@ -1499,10 +1568,10 @@ Json Client::request_with_progress(const std::string& method, Json params, Json 
   params["_meta"] = std::move(metadata);
   return request(method, std::move(params));
 }
-Json Client::discover() {
+Json Client::discover(const RequestOptions& options) {
   if (connected_) return discovery_;
   try {
-    Json info = request("server/discover");
+    Json info = request("server/discover",json::object{},options);
     const auto& versions = find(info, "supportedVersions");
     if (!versions.is_array()) throw Error(-32600, "Malformed discovery response");
     for (const auto& version : versions.array_range()) {
@@ -1520,18 +1589,21 @@ Json Client::discover() {
   legacy_ = true;
   Json init = request("initialize", json::object{{"protocolVersion", LegacyProtocolVersion},
                                      {"clientInfo", json::object{{"name", name_}, {"version", "1.0.0"}}},
-                                     {"capabilities", json::object{}}});
+                                     {"capabilities", json::object{}}},options);
   connected_ = true;
   discovery_ = init;
   // The legacy notifications/initialized message has no response. Send it directly.
   Json notification = json::object{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}};
-  send_(notification);
+  if(send_bounded_) (void)send_bounded_(notification,options);
+  else (void)send_(notification);
   return init;
 }
 Json Client::tools() { return request("tools/list"); }
-Json Client::call(const std::string& name, Json arguments) {
-  if (http_ && !tools_known_) list_all("tools/list", "tools"); // discover paginated header annotations
-  return request("tools/call", json::object{{"name", name}, {"arguments", std::move(arguments)}});
+Json Client::call(const std::string& name, Json arguments,
+                  const RequestOptions& options) {
+  if (http_ && !tools_known_) list_all("tools/list", "tools",options);
+  return request("tools/call",
+    json::object{{"name", name}, {"arguments", std::move(arguments)}},options);
 }
 Json Client::resources() { return request("resources/list"); }
 Json Client::read(const std::string& uri) { return request("resources/read", json::object{{"uri", uri}}); }
@@ -1554,14 +1626,15 @@ void Client::extension(std::string name, Json settings) {
   if (!capabilities_.contains("extensions")) capabilities_["extensions"] = json::object{};
   capabilities_.at("extensions")[name] = std::move(settings);
 }
-Json Client::list_all(const std::string& method, const std::string& array_field) {
+Json Client::list_all(const std::string& method, const std::string& array_field,
+                      const RequestOptions& options) {
   if (method != "tools/list" && method != "resources/list" && method != "prompts/list" &&
       method != "resources/templates/list") throw std::invalid_argument("Not a list operation");
   Json combined = json::array{};
   std::set<std::string> visited;
   Json params = json::object{};
   for (size_t i = 0; i < 10000; ++i) {
-    auto response = request(method, params);
+    auto response = request(method, params,options);
     if (!find(response, array_field).is_array()) throw Error(-32603, "Invalid list response");
     for (const auto& item : find(response, array_field).array_range()) combined.push_back(item);
     const auto& next = find(response, "nextCursor");
