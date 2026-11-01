@@ -1388,7 +1388,8 @@ struct HttpState {
     std::jthread cancel_watcher;
     if(options.cancelled) {
       const auto cancelled=options.cancelled;
-      cancel_watcher=std::jthread([&](std::stop_token stop) {
+      // Capture the callback BY VALUE: the watcher outlives this if-block.
+      cancel_watcher=std::jthread([&,cancelled](std::stop_token stop) {
         while(!stop.stop_requested()) {
           if(cancelled()) {c->stop();return;}
           std::this_thread::sleep_for(std::chrono::milliseconds(10));
