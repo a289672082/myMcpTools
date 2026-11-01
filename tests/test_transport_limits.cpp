@@ -63,5 +63,16 @@ int main(int argc,char** argv) {
   auto valid=mymcp::Client::process(executable,{"normal"});
   auto result=valid.discover(small_limit);
   assert(result.at("supportedVersions").is_array());
+  // Strict hosts must not mistake arbitrary C++ notification or elicitation
+  // callbacks for preemptible / deadline-bounded transport code.
+  auto bounded_http=mymcp::Client::http("http://127.0.0.1:1/mcp");
+  assert(bounded_http.has_bounded_transport());
+  auto callbacks_http=mymcp::Client::http("http://127.0.0.1:1/mcp",{},
+    [](const mymcp::Json&) {});
+  assert(!callbacks_http.has_bounded_transport());
+  bounded_http.on_input_required([](const mymcp::Json&){
+    return mymcp::Json(mymcp::json::object{});
+  });
+  assert(!bounded_http.has_bounded_transport());
   std::cout << "MCP deadline and response preparse limits OK\n";
 }
