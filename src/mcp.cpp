@@ -1165,7 +1165,7 @@ struct ProcessState {
 #endif
 #ifdef _WIN32
         unsigned char byte=0;DWORD got=0;
-        if(!ReadFile(pipe,&byte,1,&got,nullptr)||got!=1)
+        if(!ReadFile(handle,&byte,1,&got,nullptr)||got!=1)
           throw std::runtime_error("MCP child stdout closed");
         ch=byte;
 #else
