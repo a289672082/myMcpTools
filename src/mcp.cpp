@@ -21,6 +21,9 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <signal.h>
+#include <poll.h>
+#include <fcntl.h>
+#include <cerrno>
 #endif
 #include <algorithm>
 #include <cctype>
@@ -1060,6 +1063,8 @@ struct ProcessState {
   std::mutex mutex;
   FILE* child_stdout = nullptr;
   FILE* child_stdin = nullptr;
+  std::string stdout_pending;
+  bool dead = false;
 #ifdef _WIN32
   PROCESS_INFORMATION process{};
 #else
@@ -1112,32 +1117,174 @@ struct ProcessState {
 #endif
     if(!child_stdin||!child_stdout)throw std::runtime_error("stdio stream creation failed");
   }
+  // Never wait forever for a child which ignores SIGTERM.
+  void terminate_child() noexcept {
+    dead=true;
+#ifdef _WIN32
+    if(process.hProcess) {
+      TerminateProcess(process.hProcess,1);
+      WaitForSingleObject(process.hProcess,2000);
+    }
+#else
+    if(pid>0) {
+      kill(pid,SIGKILL);
+      for(int attempt=0;attempt<200;++attempt) {
+        int status=0;
+        const auto rc=waitpid(pid,&status,WNOHANG);
+        if(rc==pid || (rc<0 && errno==ECHILD)) {pid=-1;break;}
+        if(rc<0 && errno!=EINTR)break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+    }
+#endif
+  }
   ~ProcessState() {
     if(child_stdin)fclose(child_stdin);
 #ifdef _WIN32
-    if(process.hProcess) {TerminateProcess(process.hProcess,0);WaitForSingleObject(process.hProcess,2000);CloseHandle(process.hProcess);CloseHandle(process.hThread);}
+    if(process.hProcess) {
+      if(WaitForSingleObject(process.hProcess,0)==WAIT_TIMEOUT)terminate_child();
+      CloseHandle(process.hProcess);
+      CloseHandle(process.hThread);
+    }
 #else
-    if(pid>0){kill(pid,SIGTERM);waitpid(pid,nullptr,0);}
+    if(pid>0) {
+      kill(pid,SIGTERM);
+      bool exited=false;
+      for(int attempt=0;attempt<25;++attempt) {
+        int status=0;const auto rc=waitpid(pid,&status,WNOHANG);
+        if(rc==pid || (rc<0 && errno==ECHILD)) {exited=true;pid=-1;break;}
+        if(rc<0 && errno!=EINTR)break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      if(!exited)terminate_child();
+    }
 #endif
     if(child_stdout)fclose(child_stdout);
   }
-  Json send(const Json& message) {
+  Json send(const Json& message, const RequestOptions& options = {}) {
     std::lock_guard lock(mutex);
-    auto line=json::serialize(message)+"\n";
-    if(fwrite(line.data(),1,line.size(),child_stdin)!=line.size()||fflush(child_stdin)!=0)
-      throw std::runtime_error("MCP child stdin closed");
-    if(find(message,"id").is_null()) return nullptr;
-    std::string output;
-    for(;;){
-      output.clear();int ch;
-      while((ch=fgetc(child_stdout))!=EOF && ch!='\n'){
-        if(output.size()>8*1024*1024)throw std::runtime_error("MCP stdout message too large");
-        output+=char(ch);
+    if(dead)throw std::runtime_error("MCP child is no longer available");
+    const auto deadline=options.timeout.count()>0
+        ? std::chrono::steady_clock::now()+options.timeout
+        : std::chrono::steady_clock::time_point::max();
+    const auto limit=options.max_response_bytes ? options.max_response_bytes
+                                                 : std::size_t{8}*1024*1024;
+    const auto check=[&]() {
+      if(options.cancelled && options.cancelled()) {
+        terminate_child();throw std::runtime_error("MCP stdio request cancelled");
       }
-      if(ch==EOF)throw std::runtime_error("MCP child stdout closed");
-      Json msg=json::parse(output);
-      if(find(msg,"id")==find(message,"id"))return msg;
-      if(find(msg,"method").is_string() && on_notification)on_notification(msg);
+      if(std::chrono::steady_clock::now()>=deadline) {
+        terminate_child();throw std::runtime_error("MCP stdio request deadline exceeded");
+      }
+    };
+    auto line=json::serialize(message)+"\n";
+    check();
+#ifdef _WIN32
+    // A synchronous Windows pipe write can block when the child stops reading.
+    // Perform it on a dedicated I/O thread and cancel that exact thread's
+    // pending synchronous I/O when the child is terminated on deadline.
+    std::atomic_bool write_done{false};
+    std::exception_ptr write_error;
+    std::thread writer([&] {
+      try {
+        const auto fd=_fileno(child_stdin);
+        HANDLE handle=reinterpret_cast<HANDLE>(_get_osfhandle(fd));
+        std::size_t offset=0;
+        while(offset<line.size()) {
+          DWORD written=0;
+          const DWORD count=static_cast<DWORD>(std::min<std::size_t>(
+              line.size()-offset,65536));
+          if(!WriteFile(handle,line.data()+offset,count,&written,nullptr)
+              || written==0)
+            throw std::runtime_error("MCP child stdin closed");
+          offset+=written;
+        }
+      } catch(...) {write_error=std::current_exception();}
+      write_done.store(true,std::memory_order_release);
+    });
+    bool write_timed_out=false;
+    while(!write_done.load(std::memory_order_acquire)) {
+      try {check();}
+      catch(...) {
+        write_timed_out=true;
+        CancelSynchronousIo(static_cast<HANDLE>(writer.native_handle()));
+        // Killing the child closes its read end and releases pipe writers.
+        terminate_child();
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    writer.join();
+    if(write_timed_out)
+      throw std::runtime_error("MCP stdio write cancelled or timed out");
+    if(write_error)std::rethrow_exception(write_error);
+#else
+    // O_NONBLOCK + poll handles children which never read from stdin.
+    const int input_fd=fileno(child_stdin);
+    const int old_flags=fcntl(input_fd,F_GETFL,0);
+    if(old_flags<0 || fcntl(input_fd,F_SETFL,old_flags|O_NONBLOCK)<0)
+      throw std::runtime_error("Cannot configure MCP stdin nonblocking I/O");
+    std::size_t sent=0;
+    while(sent<line.size()) {
+      check();
+      pollfd fd{input_fd,POLLOUT,0};
+      const int ready=poll(&fd,1,10);
+      if(ready<0 && errno==EINTR)continue;
+      if(ready<0)throw std::runtime_error("MCP stdin poll failed");
+      if(ready==0)continue;
+      if(fd.revents&(POLLERR|POLLHUP|POLLNVAL))
+        throw std::runtime_error("MCP child stdin closed");
+      const auto bytes=::write(input_fd,line.data()+sent,line.size()-sent);
+      if(bytes<0 && (errno==EINTR||errno==EAGAIN))continue;
+      if(bytes<=0)throw std::runtime_error("MCP child stdin write failed");
+      sent+=static_cast<std::size_t>(bytes);
+    }
+#endif
+    if(find(message,"id").is_null())return nullptr;
+    for(;;) {
+      check();
+      const auto newline=stdout_pending.find('\n');
+      if(newline!=std::string::npos) {
+        const std::string output=stdout_pending.substr(0,newline);
+        stdout_pending.erase(0,newline+1);
+        if(output.size()>limit) {
+          terminate_child();throw std::runtime_error("MCP stdout message too large");
+        }
+        Json msg=json::parse(output);
+        if(find(msg,"id")==find(message,"id"))return msg;
+        if(find(msg,"method").is_string() && on_notification)on_notification(msg);
+        continue;
+      }
+      char buffer[4096];std::size_t received=0;
+#ifdef _WIN32
+      HANDLE handle=reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(child_stdout)));
+      DWORD available=0;
+      if(!PeekNamedPipe(handle,nullptr,0,nullptr,&available,nullptr))
+        throw std::runtime_error("MCP child stdout closed");
+      if(!available) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        continue;
+      }
+      DWORD bytes=0;
+      if(!ReadFile(handle,buffer,std::min<DWORD>(available,sizeof(buffer)),&bytes,nullptr)
+          || !bytes)
+        throw std::runtime_error("MCP child stdout read failed");
+      received=bytes;
+#else
+      pollfd fd{fileno(child_stdout),POLLIN,0};
+      const int ready=poll(&fd,1,10);
+      if(ready<0 && errno==EINTR)continue;
+      if(ready<0)throw std::runtime_error("MCP stdout poll failed");
+      if(!ready)continue;
+      const auto bytes=::read(fd.fd,buffer,sizeof(buffer));
+      if(bytes<0 && (errno==EINTR||errno==EAGAIN))continue;
+      if(bytes<=0)throw std::runtime_error("MCP child stdout closed");
+      received=static_cast<std::size_t>(bytes);
+#endif
+      if(received>limit || stdout_pending.size()>limit-received) {
+        terminate_child();throw std::runtime_error("MCP stdout message too large");
+      }
+      stdout_pending.append(buffer,received);
     }
   }
 };
