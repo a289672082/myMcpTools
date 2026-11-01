@@ -1196,6 +1196,7 @@ struct HttpState {
       }
     }
     auto c=new_http_client(url);
+    c->set_max_timeout(30000); // Overall deadline, not solely idle/read timeout.
     // Read SSE progressively rather than buffering the response body until
     // completion. A progress notification can now reach the app immediately.
     std::string pending;
@@ -1203,11 +1204,11 @@ struct HttpState {
     Json streamed_result = nullptr;
     auto response=c->Post(url.target, headers, json::serialize(msg), "application/json",
       [&](const char* data, std::size_t length) -> bool {
-        pending.append(data, length);
-        if (pending.size() > 4 * 1024 * 1024) {
+        if (length > 4 * 1024 * 1024 - pending.size()) {
           decode_error = "HTTP response/SSE frame too large";
           return false;
         }
+        pending.append(data, length);
         for (;;) {
           auto end = pending.find("\n\n");
           if (end == std::string::npos) break;
