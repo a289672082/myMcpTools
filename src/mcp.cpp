@@ -22,6 +22,7 @@
 #include <sys/wait.h>
 #include <poll.h>
 #include <cerrno>
+#include <pthread.h>
 #include <signal.h>
 #endif
 #include <algorithm>
