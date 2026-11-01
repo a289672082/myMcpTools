@@ -1379,6 +1379,21 @@ struct HttpState {
       c->set_connection_timeout(cs,cu);
       c->set_read_timeout(rs,ru);
       c->set_write_timeout(rs,ru);
+      // cpp-httplib's max_timeout is a *whole-request* deadline, unlike
+      // read_timeout which is refreshed by every received chunk.
+      c->set_max_timeout(bound);
+    }
+    // Stop a transport blocked inside the socket when the caller cancels
+    // before another read callback occurs. Client::stop() is thread-safe.
+    std::jthread cancel_watcher;
+    if(options.cancelled) {
+      const auto cancelled=options.cancelled;
+      cancel_watcher=std::jthread([&](std::stop_token stop) {
+        while(!stop.stop_requested()) {
+          if(cancelled()) {c->stop();return;}
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+      });
     }
     // Read SSE progressively rather than buffering the response body until
     // completion. A progress notification can now reach the app immediately.
