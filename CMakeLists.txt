@@ -141,3 +141,9 @@ if(Python3_Interpreter_FOUND)
       "$<TARGET_FILE:run_agent_tools_demo>")
   set_tests_properties(agent_tools_demo PROPERTIES TIMEOUT 90)
 endif()
+
+# 进程不合作/忽略 SIGTERM、写端阻塞、接收预算回归。
+add_executable(mymcp_transport_limits_tests tests/test_transport_limits.cpp)
+target_link_libraries(mymcp_transport_limits_tests PRIVATE mymcp)
+add_test(NAME transport_limits COMMAND mymcp_transport_limits_tests)
+set_tests_properties(transport_limits PROPERTIES TIMEOUT 25)
