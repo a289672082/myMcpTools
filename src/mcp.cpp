@@ -1516,6 +1516,7 @@ Client Client::http_oauth(const std::string& url, std::shared_ptr<oauth::Session
     return state->send(message,options);
   };
   client.http_ = true;
+  client.requires_oauth_refresh_ = true; // refresh() may block outside HTTP request budget
   return client;
 }
 Json Client::request(const std::string& method, Json params,
