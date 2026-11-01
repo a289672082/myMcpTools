@@ -1326,7 +1326,9 @@ Client::Client(std::function<Json(const Json&)> send, std::string name)
 Client Client::process(const std::string& executable, std::vector<std::string> args,
                        std::function<void(const Json&)> on_notification) {
   auto state = std::make_shared<ProcessState>(executable, args, std::move(on_notification));
-  return Client([state](const Json& message){ return state->send(message); });
+  Client client([state](const Json& message){ return state->send(message); });
+  client.configure_transport_=[state](Client::TransportLimits opts){state->limits=opts;};
+  return client;
 }
 Client Client::http(const std::string& url, std::string bearer_token,
                     std::function<void(const Json&)> on_notification) {
@@ -1334,6 +1336,7 @@ Client Client::http(const std::string& url, std::string bearer_token,
   state->on_notification = std::move(on_notification);
   Client client([state](const Json& message){ return state->send(message); });
   client.http_ = true;
+  client.configure_transport_=[state](Client::TransportLimits opts){state->limits=opts;};
   return client;
 }
 Client Client::http_oauth(const std::string& url, std::shared_ptr<oauth::Session> session,
@@ -1344,6 +1347,7 @@ Client Client::http_oauth(const std::string& url, std::shared_ptr<oauth::Session
   state->on_notification = std::move(on_notification);
   Client client([state](const Json& message){ return state->send(message); });
   client.http_ = true;
+  client.configure_transport_=[state](Client::TransportLimits opts){state->limits=opts;};
   return client;
 }
 Json Client::request(const std::string& method, Json params) {
