@@ -1353,13 +1353,13 @@ struct HttpState {
     auto c=new_http_client(url);
     if(options.timeout.count()>0) {
       const auto bound=std::max(std::chrono::milliseconds(1),options.timeout);
-      const auto connection=std::min(bound,std::chrono::seconds(5));
+      const auto connection=std::min(bound,std::chrono::milliseconds(5000));
       const auto to_times=[](std::chrono::milliseconds time) {
         return std::pair<time_t,time_t>{static_cast<time_t>(time.count()/1000),
                                         static_cast<time_t>((time.count()%1000)*1000)};
       };
       const auto [cs,cu]=to_times(connection);
-      const auto [rs,ru]=to_times(std::min(bound,std::chrono::seconds(30)));
+      const auto [rs,ru]=to_times(std::min(bound,std::chrono::milliseconds(30000)));
       c->set_connection_timeout(cs,cu);
       c->set_read_timeout(rs,ru);
       c->set_write_timeout(rs,ru);
