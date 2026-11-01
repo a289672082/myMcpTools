@@ -1350,6 +1350,14 @@ Client Client::http_oauth(const std::string& url, std::shared_ptr<oauth::Session
   client.configure_transport_=[state](Client::TransportLimits opts){state->limits=opts;};
   return client;
 }
+void Client::set_transport_limits(TransportLimits limits) {
+  if(limits.timeout.count()<=0 || limits.max_response_bytes<256 ||
+     limits.max_response_bytes>64*1024*1024)
+    throw std::invalid_argument("Invalid MCP transport limits");
+  if(!configure_transport_)
+    throw std::logic_error("Custom transport does not support configuration");
+  configure_transport_(limits);
+}
 Json Client::request(const std::string& method, Json params) {
   if (!params.is_object()) throw std::invalid_argument("Request params must be an object");
   if (!connected_ && method != "server/discover" && method != "initialize") discover();
