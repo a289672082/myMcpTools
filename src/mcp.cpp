@@ -1139,14 +1139,36 @@ struct ProcessState {
     if(fwrite(line.data(),1,line.size(),child_stdin)!=line.size()||fflush(child_stdin)!=0)
       throw std::runtime_error("MCP child stdin closed");
     if(find(message,"id").is_null()) return nullptr;
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(30);
     std::string output;
     for(;;){
       output.clear();int ch;
-      while((ch=fgetc(child_stdout))!=EOF && ch!='\n'){
-        if(output.size()>8*1024*1024)throw std::runtime_error("MCP stdout message too large");
+      for(;;){
+        auto remaining=std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline-std::chrono::steady_clock::now()).count();
+        if(remaining<=0)throw std::runtime_error("MCP stdio deadline exceeded");
+#ifdef _WIN32
+        DWORD available=0;
+        auto handle=reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(child_stdout)));
+        if(!PeekNamedPipe(handle,nullptr,0,nullptr,&available,nullptr))
+          throw std::runtime_error("MCP child stdout unavailable");
+        if(!available){
+          std::this_thread::sleep_for(std::chrono::milliseconds(std::min<long long>(remaining,10)));
+          continue;
+        }
+#else
+        pollfd fd{fileno(child_stdout),POLLIN,0};
+        const int ready=poll(&fd,1,static_cast<int>(std::min<long long>(remaining,50)));
+        if(ready<0){if(errno==EINTR)continue;throw std::runtime_error("MCP stdio poll failed");}
+        if(!ready)continue;
+#endif
+        ch=fgetc(child_stdout);
+        if(ch==EOF)throw std::runtime_error("MCP child stdout closed");
+        if(ch=='\n')break;
+        if(output.size()>=8*1024*1024)
+          throw std::runtime_error("MCP stdout message too large");
         output+=char(ch);
       }
-      if(ch==EOF)throw std::runtime_error("MCP child stdout closed");
       Json msg=json::parse(output);
       if(find(msg,"id")==find(message,"id"))return msg;
       if(find(msg,"method").is_string() && on_notification)on_notification(msg);
