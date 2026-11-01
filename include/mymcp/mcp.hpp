@@ -220,6 +220,12 @@ private:
 
 class Client {
 public:
+  struct TransportLimits {
+    std::chrono::milliseconds timeout{30000};
+    std::size_t max_response_bytes=4*1024*1024;
+  };
+  // Limits apply to the SDK transport before it decodes JSON.
+  void set_transport_limits(TransportLimits limits);
   explicit Client(std::function<Json(const Json&)> send, std::string name = "mymcp-client");
   static Client process(const std::string& executable, std::vector<std::string> args = {},
                         std::function<void(const Json&)> on_notification = {});
@@ -261,6 +267,7 @@ public:
   }
 private:
   std::function<Json(const Json&)> send_;
+  std::function<void(TransportLimits)> configure_transport_;
   std::string name_;
   long long next_id_ = 1;
   Json capabilities_ = json::object{};
