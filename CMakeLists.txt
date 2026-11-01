@@ -147,3 +147,8 @@ add_executable(mymcp_transport_limits_tests tests/test_transport_limits.cpp)
 target_link_libraries(mymcp_transport_limits_tests PRIVATE mymcp)
 add_test(NAME transport_limits COMMAND mymcp_transport_limits_tests)
 set_tests_properties(transport_limits PROPERTIES TIMEOUT 25)
+
+add_executable(mymcp_http_limits_tests tests/test_http_limits.cpp)
+target_link_libraries(mymcp_http_limits_tests PRIVATE mymcp)
+add_test(NAME http_limits COMMAND mymcp_http_limits_tests)
+set_tests_properties(http_limits PROPERTIES TIMEOUT 15)
