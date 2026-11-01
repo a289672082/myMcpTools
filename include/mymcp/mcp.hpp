@@ -245,7 +245,8 @@ public:
   // true 仅对 SDK 自带的 stdio/HTTP 传输成立；自定义进程内 lambda
   // 无法保证回调支持强制超时，严格隔离场景必须拒绝它们。
   bool has_bounded_transport() const noexcept {
-    return static_cast<bool>(send_bounded_) && !requires_oauth_refresh_;
+    return static_cast<bool>(send_bounded_) && !requires_oauth_refresh_ &&
+           !has_untrusted_callback_ && !input_handler_;
   }
   Json discover(const RequestOptions& options = {});
   Json request(const std::string& method, Json params = json::object{},
@@ -288,6 +289,7 @@ private:
   bool http_ = false;
   bool tools_known_ = false;
   bool requires_oauth_refresh_ = false; // OAuth token acquisition currently has separate I/O.
+  bool has_untrusted_callback_ = false; // C++ notification callback may never return.
   std::function<Json(const Json&)> input_handler_;
 };
 

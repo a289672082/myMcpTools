@@ -1503,15 +1503,18 @@ Client::Client(std::function<Json(const Json&)> send, std::string name)
     : send_(std::move(send)), name_(std::move(name)) {}
 Client Client::process(const std::string& executable, std::vector<std::string> args,
                        std::function<void(const Json&)> on_notification) {
+  const bool callback_present=static_cast<bool>(on_notification);
   auto state = std::make_shared<ProcessState>(executable, args, std::move(on_notification));
   Client client([state](const Json& message){ return state->send(message); });
   client.send_bounded_=[state](const Json& message,const RequestOptions& options) {
     return state->send(message,options);
   };
+  client.has_untrusted_callback_=callback_present;
   return client;
 }
 Client Client::http(const std::string& url, std::string bearer_token,
                     std::function<void(const Json&)> on_notification) {
+  const bool callback_present=static_cast<bool>(on_notification);
   auto state = std::make_shared<HttpState>(url, std::move(bearer_token));
   state->on_notification = std::move(on_notification);
   Client client([state](const Json& message){ return state->send(message); });
@@ -1519,10 +1522,12 @@ Client Client::http(const std::string& url, std::string bearer_token,
     return state->send(message,options);
   };
   client.http_ = true;
+  client.has_untrusted_callback_=callback_present;
   return client;
 }
 Client Client::http_oauth(const std::string& url, std::shared_ptr<oauth::Session> session,
                           std::function<void(const Json&)> on_notification) {
+  const bool callback_present=static_cast<bool>(on_notification);
   if (!session) throw std::invalid_argument("OAuth session is null");
   auto state = std::make_shared<HttpState>(url, std::string{});
   state->oauth_session = std::move(session);
@@ -1533,6 +1538,7 @@ Client Client::http_oauth(const std::string& url, std::shared_ptr<oauth::Session
   };
   client.http_ = true;
   client.requires_oauth_refresh_ = true; // refresh() may block outside HTTP request budget
+  client.has_untrusted_callback_=callback_present;
   return client;
 }
 Json Client::request(const std::string& method, Json params,
