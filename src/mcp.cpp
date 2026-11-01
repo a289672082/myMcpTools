@@ -1092,6 +1092,7 @@ struct ProcessState {
   Client::TransportLimits limits{std::chrono::milliseconds(30000),8*1024*1024};
 #ifdef _WIN32
   PROCESS_INFORMATION process{};
+  HANDLE process_job=nullptr; // Close the whole MCP process tree on timeout.
 #else
   pid_t pid = -1;
 #endif
@@ -1122,6 +1123,17 @@ struct ProcessState {
     BOOL ok=CreateProcessA(executable.c_str(),command.data(),nullptr,nullptr,TRUE,CREATE_NO_WINDOW,nullptr,nullptr,&si,&process);
     CloseHandle(rd_in);CloseHandle(wr_out);
     if(!ok){CloseHandle(rd_out);CloseHandle(wr_in);throw std::runtime_error("CreateProcess failed");}
+    process_job=CreateJobObjectA(nullptr,nullptr);
+    if(process_job){
+      JOBOBJECT_EXTENDED_LIMIT_INFORMATION config{};
+      config.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+      if(!SetInformationJobObject(process_job,JobObjectExtendedLimitInformation,
+                                 &config,sizeof(config)) ||
+         !AssignProcessToJobObject(process_job,process.hProcess)){
+        CloseHandle(process_job);
+        process_job=nullptr; // Fallback to direct process termination.
+      }
+    }
     child_stdout=_fdopen(_open_osfhandle((intptr_t)rd_out,_O_RDONLY),"rb");
     child_stdin=_fdopen(_open_osfhandle((intptr_t)wr_in,_O_WRONLY),"wb");
 #else
@@ -1148,7 +1160,13 @@ struct ProcessState {
   ~ProcessState() {
     if(child_stdin)fclose(child_stdin);
 #ifdef _WIN32
-    if(process.hProcess) {TerminateProcess(process.hProcess,0);WaitForSingleObject(process.hProcess,2000);CloseHandle(process.hProcess);CloseHandle(process.hThread);}
+    if(process.hProcess) {
+      if(process_job)TerminateJobObject(process_job,0);
+      else TerminateProcess(process.hProcess,0);
+      WaitForSingleObject(process.hProcess,2000);
+      CloseHandle(process.hProcess);CloseHandle(process.hThread);
+    }
+    if(process_job)CloseHandle(process_job);
 #else
     if(pid>0){
       if(getpgid(pid)==pid)kill(-pid,SIGTERM);
@@ -1179,7 +1197,8 @@ struct ProcessState {
         if(std::chrono::steady_clock::now()>=deadline){
           expired=true;
 #ifdef _WIN32
-          if(process.hProcess)TerminateProcess(process.hProcess,1);
+          if(process_job)TerminateJobObject(process_job,1);
+          else if(process.hProcess)TerminateProcess(process.hProcess,1);
 #else
           if(pid>0){
             if(getpgid(pid)==pid)kill(-pid,SIGKILL);
