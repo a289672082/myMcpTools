@@ -218,10 +218,10 @@ private:
   bool legacy_initialized_ = false;
 };
 
-// 每次 MCP 请求的资源约束。0 表示使用 SDK 默认值（超时 0 为不设截止时间）。
+// 每次 MCP 请求的资源约束。响应字节数 0 表示 SDK 默认上限；超时默认 30 秒，显式 0 表示不设截止时间。
 // Cancel callback 必须能安全地由调用线程读取；不可信进程建议使用 process() 隔离。
 struct RequestOptions {
-  std::chrono::milliseconds timeout{0};
+  std::chrono::milliseconds timeout{std::chrono::seconds(30)}; // 默认硬截止时间；0=显式无限制
   std::size_t max_response_bytes = 0;
   std::function<bool()> cancelled;
 };
