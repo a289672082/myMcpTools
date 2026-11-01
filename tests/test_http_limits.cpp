@@ -1,5 +1,6 @@
 // 真实本地 HTTP MCP 服务端：验证接收前字节限额及整个请求的截止时间。
 #include "mymcp/mcp.hpp"
+#include "mymcp/oauth_client.hpp"
 #include "httplib.h"
 #include <cassert>
 #include <chrono>
@@ -25,6 +26,13 @@ int main(){
   for(int i=0;i<200 && !server.is_running();++i)std::this_thread::sleep_for(5ms);
   assert(server.is_running());
   const auto origin="http://127.0.0.1:"+std::to_string(port);
+  auto custom=mymcp::Client([](const mymcp::Json&){return mymcp::json::object{};});
+  assert(!custom.has_bounded_transport());
+  auto oauth=std::make_shared<mymcp::oauth::Session>(origin+"/oversized");
+  auto oauth_client=mymcp::Client::http_oauth(origin+"/oversized",oauth);
+  assert(!oauth_client.has_bounded_transport());
+  auto supported=mymcp::Client::http(origin+"/oversized");
+  assert(supported.has_bounded_transport());
   mymcp::RequestOptions limited;
   limited.timeout=2s;
   limited.max_response_bytes=256;
