@@ -32,7 +32,9 @@ int main(int argc,char** argv){
     client.set_transport_limits({timeout,max_bytes});
     bool rejected=false;
     try{
-      (void)client.request("server/discover",mymcp::json::object{});
+      mymcp::Json params=mymcp::json::object{};
+      if(mode=="no-read")params["bulk"]=std::string(1024*1024,'x');
+      (void)client.request("server/discover",params);
     }catch(const std::exception& e){
       rejected=true;
       const std::string message=e.what();
@@ -42,6 +44,7 @@ int main(int argc,char** argv){
     assert(std::chrono::steady_clock::now()-begin<10s);
   };
   verify("stall",1024,800ms,"deadline");
+  verify("no-read",1024,800ms,"deadline");
   verify("oversize",512,3000ms,"limit");
   std::cout<<"stdio limits tests passed\n";
 }
