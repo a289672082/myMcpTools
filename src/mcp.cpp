@@ -20,6 +20,8 @@
 #else
 #include <unistd.h>
 #include <sys/wait.h>
+#include <poll.h>
+#include <cerrno>
 #include <signal.h>
 #endif
 #include <algorithm>
@@ -1111,13 +1113,23 @@ struct ProcessState {
     child_stdin=fdopen(in_pipe[1],"w");child_stdout=fdopen(out_pipe[0],"r");
 #endif
     if(!child_stdin||!child_stdout)throw std::runtime_error("stdio stream creation failed");
+    setvbuf(child_stdout,nullptr,_IONBF,0);
   }
   ~ProcessState() {
     if(child_stdin)fclose(child_stdin);
 #ifdef _WIN32
     if(process.hProcess) {TerminateProcess(process.hProcess,0);WaitForSingleObject(process.hProcess,2000);CloseHandle(process.hProcess);CloseHandle(process.hThread);}
 #else
-    if(pid>0){kill(pid,SIGTERM);waitpid(pid,nullptr,0);}
+    if(pid>0){
+      kill(pid,SIGTERM);
+      bool done=false;
+      for(int i=0;i<20;++i){
+        const pid_t r=waitpid(pid,nullptr,WNOHANG);
+        if(r==pid||r<0){done=true;break;}
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      if(!done){kill(pid,SIGKILL);while(waitpid(pid,nullptr,0)<0&&errno==EINTR){}}
+    }
 #endif
     if(child_stdout)fclose(child_stdout);
   }
