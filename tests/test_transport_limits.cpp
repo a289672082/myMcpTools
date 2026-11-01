@@ -57,11 +57,11 @@ int main(int argc,char** argv) {
   auto canceled=bounded;
   canceled.cancelled=[] {return true;};
   must_fail_fast("silent",canceled);
-  auto small=bounded;
-  small.timeout=3s;
-  must_fail_fast("large",small);
+  auto small_limit=bounded;
+  small_limit.timeout=3s;
+  must_fail_fast("large",small_limit);
   auto valid=mymcp::Client::process(executable,{"normal"});
-  auto result=valid.discover(small);
+  auto result=valid.discover(small_limit);
   assert(result.at("supportedVersions").is_array());
   std::cout << "MCP deadline and response preparse limits OK\n";
 }
