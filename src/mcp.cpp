@@ -24,6 +24,7 @@
 #include <poll.h>
 #include <fcntl.h>
 #include <cerrno>
+#include <pthread.h>
 #endif
 #include <algorithm>
 #include <cctype>
@@ -1234,8 +1235,23 @@ struct ProcessState {
       if(ready==0)continue;
       if(fd.revents&(POLLERR|POLLHUP|POLLNVAL))
         throw std::runtime_error("MCP child stdin closed");
+      // A disconnected child must raise EPIPE, never terminate the Agent via
+      // process-wide SIGPIPE. Block SIGPIPE on this I/O thread only, then
+      // consume a newly generated pending signal before restoring its mask.
+      sigset_t blocked,old_mask,pending_before;
+      sigemptyset(&blocked);sigaddset(&blocked,SIGPIPE);
+      if(pthread_sigmask(SIG_BLOCK,&blocked,&old_mask)!=0)
+        throw std::runtime_error("Cannot mask MCP pipe signals");
+      sigpending(&pending_before);
+      const bool prior_sigpipe=sigismember(&pending_before,SIGPIPE)==1;
       const auto bytes=::write(input_fd,line.data()+sent,line.size()-sent);
-      if(bytes<0 && (errno==EINTR||errno==EAGAIN))continue;
+      const int write_error=errno;
+      if(bytes<0 && write_error==EPIPE && !prior_sigpipe) {
+        timespec immediate{0,0};
+        (void)sigtimedwait(&blocked,nullptr,&immediate);
+      }
+      pthread_sigmask(SIG_SETMASK,&old_mask,nullptr);
+      if(bytes<0 && (write_error==EINTR||write_error==EAGAIN))continue;
       if(bytes<=0)throw std::runtime_error("MCP child stdin write failed");
       sent+=static_cast<std::size_t>(bytes);
     }
