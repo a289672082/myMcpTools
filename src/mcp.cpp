@@ -1136,11 +1136,26 @@ struct ProcessState {
   }
   Json send(const Json& message) {
     std::lock_guard lock(mutex);
+    // Cover writes as well as reads. If a child stops consuming stdin, the
+    // watchdog closes the protocol by ending that child process.
+    const auto deadline=std::chrono::steady_clock::now()+limits.timeout;
+    std::jthread watchdog([this,deadline](std::stop_token stop){
+      while(!stop.stop_requested()){
+        if(std::chrono::steady_clock::now()>=deadline){
+#ifdef _WIN32
+          if(process.hProcess)TerminateProcess(process.hProcess,1);
+#else
+          if(pid>0)kill(pid,SIGKILL);
+#endif
+          return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+    });
     auto line=json::serialize(message)+"\n";
     if(fwrite(line.data(),1,line.size(),child_stdin)!=line.size()||fflush(child_stdin)!=0)
       throw std::runtime_error("MCP child stdin closed");
     if(find(message,"id").is_null()) return nullptr;
-    const auto deadline=std::chrono::steady_clock::now()+limits.timeout;
     std::string output;
     for(;;){
       output.clear();int ch;
