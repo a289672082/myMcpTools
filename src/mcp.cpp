@@ -1586,8 +1586,24 @@ Json Client::request_with_progress(const std::string& method, Json params, Json 
 }
 Json Client::discover(const RequestOptions& options) {
   if (connected_) return discovery_;
+  const auto deadline=options.timeout.count()>0
+      ? std::chrono::steady_clock::now()+options.timeout
+      : std::chrono::steady_clock::time_point::max();
+  const auto remaining=[&] {
+    if(options.cancelled && options.cancelled())
+      throw std::runtime_error("MCP discovery cancelled");
+    auto request_options=options;
+    if(deadline!=std::chrono::steady_clock::time_point::max()) {
+      if(std::chrono::steady_clock::now()>=deadline)
+        throw std::runtime_error("MCP discovery deadline exceeded");
+      request_options.timeout=std::max(std::chrono::milliseconds{1},
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+          deadline-std::chrono::steady_clock::now()));
+    }
+    return request_options;
+  };
   try {
-    Json info = request("server/discover",json::object{},options);
+    Json info = request("server/discover",json::object{},remaining());
     const auto& versions = find(info, "supportedVersions");
     if (!versions.is_array()) throw Error(-32600, "Malformed discovery response");
     for (const auto& version : versions.array_range()) {
@@ -1605,12 +1621,12 @@ Json Client::discover(const RequestOptions& options) {
   legacy_ = true;
   Json init = request("initialize", json::object{{"protocolVersion", LegacyProtocolVersion},
                                      {"clientInfo", json::object{{"name", name_}, {"version", "1.0.0"}}},
-                                     {"capabilities", json::object{}}},options);
+                                     {"capabilities", json::object{}}},remaining());
   connected_ = true;
   discovery_ = init;
   // The legacy notifications/initialized message has no response. Send it directly.
   Json notification = json::object{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}};
-  if(send_bounded_) (void)send_bounded_(notification,options);
+  if(send_bounded_) (void)send_bounded_(notification,remaining());
   else (void)send_(notification);
   return init;
 }
@@ -1644,13 +1660,26 @@ void Client::extension(std::string name, Json settings) {
 }
 Json Client::list_all(const std::string& method, const std::string& array_field,
                       const RequestOptions& options) {
+  const auto deadline=options.timeout.count()>0
+      ? std::chrono::steady_clock::now()+options.timeout
+      : std::chrono::steady_clock::time_point::max();
   if (method != "tools/list" && method != "resources/list" && method != "prompts/list" &&
       method != "resources/templates/list") throw std::invalid_argument("Not a list operation");
   Json combined = json::array{};
   std::set<std::string> visited;
   Json params = json::object{};
   for (size_t i = 0; i < 10000; ++i) {
-    auto response = request(method, params,options);
+    auto per_page=options;
+    if(options.cancelled && options.cancelled())
+      throw std::runtime_error("MCP catalog discovery cancelled");
+    if(deadline!=std::chrono::steady_clock::time_point::max()) {
+      if(std::chrono::steady_clock::now()>=deadline)
+        throw std::runtime_error("MCP catalog deadline exceeded");
+      per_page.timeout=std::max(std::chrono::milliseconds{1},
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+          deadline-std::chrono::steady_clock::now()));
+    }
+    auto response=request(method,params,per_page);
     if (!find(response, array_field).is_array()) throw Error(-32603, "Invalid list response");
     for (const auto& item : find(response, array_field).array_range()) combined.push_back(item);
     const auto& next = find(response, "nextCursor");
