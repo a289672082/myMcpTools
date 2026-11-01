@@ -1062,6 +1062,7 @@ struct ProcessState {
   std::mutex mutex;
   FILE* child_stdout = nullptr;
   FILE* child_stdin = nullptr;
+  Client::TransportLimits limits{std::chrono::milliseconds(30000),8*1024*1024};
 #ifdef _WIN32
   PROCESS_INFORMATION process{};
 #else
@@ -1139,7 +1140,7 @@ struct ProcessState {
     if(fwrite(line.data(),1,line.size(),child_stdin)!=line.size()||fflush(child_stdin)!=0)
       throw std::runtime_error("MCP child stdin closed");
     if(find(message,"id").is_null()) return nullptr;
-    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(30);
+    const auto deadline=std::chrono::steady_clock::now()+limits.timeout;
     std::string output;
     for(;;){
       output.clear();int ch;
@@ -1165,7 +1166,7 @@ struct ProcessState {
         ch=fgetc(child_stdout);
         if(ch==EOF)throw std::runtime_error("MCP child stdout closed");
         if(ch=='\n')break;
-        if(output.size()>=8*1024*1024)
+        if(output.size()>=limits.max_response_bytes)
           throw std::runtime_error("MCP stdout message too large");
         output+=char(ch);
       }
@@ -1204,6 +1205,7 @@ struct HttpState {
   std::string token;
   std::shared_ptr<oauth::Session> oauth_session;
   std::function<void(const Json&)> on_notification;
+  Client::TransportLimits limits{};
   explicit HttpState(const std::string& path,std::string bearer):url(parse_url(path)),token(std::move(bearer)){}
   Json send(const Json& msg) {
     std::lock_guard lock(mutex);
@@ -1230,7 +1232,7 @@ struct HttpState {
       }
     }
     auto c=new_http_client(url);
-    c->set_max_timeout(30000); // Overall deadline, not solely idle/read timeout.
+    c->set_max_timeout(limits.timeout); // Overall deadline, not solely idle/read timeout.
     // Read SSE progressively rather than buffering the response body until
     // completion. A progress notification can now reach the app immediately.
     std::string pending;
@@ -1238,7 +1240,7 @@ struct HttpState {
     Json streamed_result = nullptr;
     auto response=c->Post(url.target, headers, json::serialize(msg), "application/json",
       [&](const char* data, std::size_t length) -> bool {
-        if (length > 4 * 1024 * 1024 - pending.size()) {
+        if (length > limits.max_response_bytes - pending.size()) {
           decode_error = "HTTP response/SSE frame too large";
           return false;
         }
