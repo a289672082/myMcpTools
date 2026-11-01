@@ -260,7 +260,8 @@ public:
   Json cancel_task(const std::string& task_id);
   Json complete(Json ref, std::string argument_name, std::string value,
                 Json context = json::object{});
-  Json list_all(const std::string& method, const std::string& array_field);
+  Json list_all(const std::string& method, const std::string& array_field,
+                const RequestOptions& options = {});
   void extension(std::string name, Json settings = json::object{});
   Json capabilities() const { return capabilities_; }
   // Callback receives inputRequests and returns a JSON object keyed by request IDs.
