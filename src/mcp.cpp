@@ -1057,6 +1057,32 @@ void Server::run_http(unsigned short port, std::string host) {
 }
 
 namespace {
+// Pipe writes may fail with EPIPE when a deadline watchdog terminates the
+// child. Block SIGPIPE only on the calling thread and consume a new pending
+// signal before restoring the user's original signal mask.
+#ifndef _WIN32
+struct ScopedSigpipeBlock {
+  sigset_t blocked{},previous{};
+  bool had_pending=false;
+  ScopedSigpipeBlock() {
+    sigemptyset(&blocked);sigaddset(&blocked,SIGPIPE);
+    sigset_t before{};
+    if(sigpending(&before)==0)had_pending=sigismember(&before,SIGPIPE)==1;
+    if(pthread_sigmask(SIG_BLOCK,&blocked,&previous)!=0)
+      throw std::runtime_error("Cannot mask SIGPIPE");
+  }
+  ~ScopedSigpipeBlock() {
+    if(!had_pending) {
+      sigset_t pending{};
+      if(sigpending(&pending)==0 && sigismember(&pending,SIGPIPE)==1) {
+        timespec zero{};
+        (void)sigtimedwait(&blocked,nullptr,&zero);
+      }
+    }
+    (void)pthread_sigmask(SIG_SETMASK,&previous,nullptr);
+  }
+};
+#endif
 // The stdio process transport has no external runtime dependencies.
 struct ProcessState {
   std::function<void(const Json&)> on_notification;
@@ -1156,8 +1182,13 @@ struct ProcessState {
       }
     });
     auto line=json::serialize(message)+"\n";
-    if(fwrite(line.data(),1,line.size(),child_stdin)!=line.size()||fflush(child_stdin)!=0)
-      throw std::runtime_error(expired ? "MCP stdio deadline exceeded" : "MCP child stdin closed");
+    {
+#ifndef _WIN32
+      ScopedSigpipeBlock ignore_broken_pipe;
+#endif
+      if(fwrite(line.data(),1,line.size(),child_stdin)!=line.size()||fflush(child_stdin)!=0)
+        throw std::runtime_error(expired ? "MCP stdio deadline exceeded" : "MCP child stdin closed");
+    }
     if(find(message,"id").is_null()) return nullptr;
     std::string output;
     for(;;){
