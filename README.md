@@ -258,7 +258,7 @@ To run a complete no-argument client/server pair, start `run_http_server_demo`, 
 
 ## MCP 传输截止时间与资源限额（P0/P1）
 
-SDK 自带 Client::process / Client::http / Client::http_oauth 支持 RequestOptions。默认 30 秒整体截止时间；超时或取消后，stdio 子进程被终止并回收。HTTP/SSE 响应在追加数据前检查大小。
+SDK 自带 Client::process / Client::http / Client::http_oauth 支持 RequestOptions（OAuth 刷新凭据阶段另有同步 I/O 限制）。默认 30 秒请求截止时间；超时或取消后，stdio 子进程被终止并回收。HTTP/SSE 响应在追加数据前检查大小。
 
 ~~~cpp
 mymcp::RequestOptions limits;
