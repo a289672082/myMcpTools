@@ -1163,8 +1163,18 @@ struct ProcessState {
         if(ready<0){if(errno==EINTR)continue;throw std::runtime_error("MCP stdio poll failed");}
         if(!ready)continue;
 #endif
-        ch=fgetc(child_stdout);
-        if(ch==EOF)throw std::runtime_error("MCP child stdout closed");
+#ifdef _WIN32
+        unsigned char byte=0;DWORD got=0;
+        if(!ReadFile(pipe,&byte,1,&got,nullptr)||got!=1)
+          throw std::runtime_error("MCP child stdout closed");
+        ch=byte;
+#else
+        unsigned char byte=0;
+        const ssize_t got=read(fileno(child_stdout),&byte,1);
+        if(got<0 && errno==EINTR)continue;
+        if(got!=1)throw std::runtime_error("MCP child stdout closed");
+        ch=byte;
+#endif
         if(ch=='\n')break;
         if(output.size()>=limits.max_response_bytes)
           throw std::runtime_error("MCP stdout message too large");
