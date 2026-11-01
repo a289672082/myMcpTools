@@ -45,6 +45,6 @@ int main(int argc,char** argv){
   };
   verify("stall",1024,800ms,"deadline");
   verify("no-read",1024,800ms,"deadline");
-  verify("oversize",512,3000ms,"limit");
+  verify("oversize",512,3000ms,"too large");
   std::cout<<"stdio limits tests passed\n";
 }
