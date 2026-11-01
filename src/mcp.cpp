@@ -1131,12 +1131,14 @@ struct ProcessState {
     pid=fork();
     if(pid<0){close(in_pipe[0]);close(in_pipe[1]);close(out_pipe[0]);close(out_pipe[1]);throw std::runtime_error("fork failed");}
     if(pid==0){
+      (void)setpgid(0,0); // Isolate child's process group for deadline cleanup.
       dup2(in_pipe[0],STDIN_FILENO);dup2(out_pipe[1],STDOUT_FILENO);
       close(in_pipe[0]);close(in_pipe[1]);close(out_pipe[0]);close(out_pipe[1]);
       std::vector<char*> argv;argv.push_back(const_cast<char*>(executable.c_str()));
       for(const auto& a:args)argv.push_back(const_cast<char*>(a.c_str()));
       argv.push_back(nullptr);execvp(executable.c_str(),argv.data());_exit(127);
     }
+    (void)setpgid(pid,pid); // Harmless if the child already exec'd.
     close(in_pipe[0]);close(out_pipe[1]);
     child_stdin=fdopen(in_pipe[1],"w");child_stdout=fdopen(out_pipe[0],"r");
 #endif
@@ -1149,14 +1151,19 @@ struct ProcessState {
     if(process.hProcess) {TerminateProcess(process.hProcess,0);WaitForSingleObject(process.hProcess,2000);CloseHandle(process.hProcess);CloseHandle(process.hThread);}
 #else
     if(pid>0){
-      kill(pid,SIGTERM);
+      if(getpgid(pid)==pid)kill(-pid,SIGTERM);
+      else kill(pid,SIGTERM);
       bool done=false;
       for(int i=0;i<20;++i){
         const pid_t r=waitpid(pid,nullptr,WNOHANG);
         if(r==pid||r<0){done=true;break;}
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
       }
-      if(!done){kill(pid,SIGKILL);while(waitpid(pid,nullptr,0)<0&&errno==EINTR){}}
+      if(!done){
+        if(getpgid(pid)==pid)kill(-pid,SIGKILL);
+        else kill(pid,SIGKILL);
+        while(waitpid(pid,nullptr,0)<0&&errno==EINTR){}
+      }
     }
 #endif
     if(child_stdout)fclose(child_stdout);
@@ -1174,7 +1181,10 @@ struct ProcessState {
 #ifdef _WIN32
           if(process.hProcess)TerminateProcess(process.hProcess,1);
 #else
-          if(pid>0)kill(pid,SIGKILL);
+          if(pid>0){
+            if(getpgid(pid)==pid)kill(-pid,SIGKILL);
+            else kill(pid,SIGKILL);
+          }
 #endif
           return;
         }
