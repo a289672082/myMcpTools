@@ -1068,6 +1068,7 @@ struct ProcessState {
   bool dead = false;
 #ifdef _WIN32
   PROCESS_INFORMATION process{};
+  HANDLE process_job=nullptr; // Kill descendants as a group on deadline.
 #else
   pid_t pid = -1;
 #endif
@@ -1098,6 +1099,15 @@ struct ProcessState {
     BOOL ok=CreateProcessA(executable.c_str(),command.data(),nullptr,nullptr,TRUE,CREATE_NO_WINDOW,nullptr,nullptr,&si,&process);
     CloseHandle(rd_in);CloseHandle(wr_out);
     if(!ok){CloseHandle(rd_out);CloseHandle(wr_in);throw std::runtime_error("CreateProcess failed");}
+    process_job=CreateJobObjectA(nullptr,nullptr);
+    if(process_job) {
+      JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
+      info.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+      if(!SetInformationJobObject(process_job,JobObjectExtendedLimitInformation,&info,sizeof(info)) ||
+         !AssignProcessToJobObject(process_job,process.hProcess)) {
+        CloseHandle(process_job);process_job=nullptr;
+      }
+    }
     child_stdout=_fdopen(_open_osfhandle((intptr_t)rd_out,_O_RDONLY),"rb");
     child_stdin=_fdopen(_open_osfhandle((intptr_t)wr_in,_O_WRONLY),"wb");
 #else
@@ -1107,12 +1117,14 @@ struct ProcessState {
     pid=fork();
     if(pid<0){close(in_pipe[0]);close(in_pipe[1]);close(out_pipe[0]);close(out_pipe[1]);throw std::runtime_error("fork failed");}
     if(pid==0){
+      (void)setpgid(0,0); // Own process group: terminate grandchildren too.
       dup2(in_pipe[0],STDIN_FILENO);dup2(out_pipe[1],STDOUT_FILENO);
       close(in_pipe[0]);close(in_pipe[1]);close(out_pipe[0]);close(out_pipe[1]);
       std::vector<char*> argv;argv.push_back(const_cast<char*>(executable.c_str()));
       for(const auto& a:args)argv.push_back(const_cast<char*>(a.c_str()));
       argv.push_back(nullptr);execvp(executable.c_str(),argv.data());_exit(127);
     }
+    (void)setpgid(pid,pid); // Race-safe with child-side setpgid.
     close(in_pipe[0]);close(out_pipe[1]);
     child_stdin=fdopen(in_pipe[1],"w");child_stdout=fdopen(out_pipe[0],"r");
 #endif
@@ -1123,12 +1135,16 @@ struct ProcessState {
     dead=true;
 #ifdef _WIN32
     if(process.hProcess) {
-      TerminateProcess(process.hProcess,1);
+      if(process_job)TerminateJobObject(process_job,1);
+      else TerminateProcess(process.hProcess,1);
       WaitForSingleObject(process.hProcess,2000);
     }
 #else
     if(pid>0) {
-      kill(pid,SIGKILL);
+      // Only signal a process group if this child leads its own group.
+      // Otherwise avoid accidentally signalling the Agent's process group.
+      if(getpgid(pid)==pid)kill(-pid,SIGKILL);
+      else kill(pid,SIGKILL);
       for(int attempt=0;attempt<200;++attempt) {
         int status=0;
         const auto rc=waitpid(pid,&status,WNOHANG);
@@ -1147,9 +1163,11 @@ struct ProcessState {
       CloseHandle(process.hProcess);
       CloseHandle(process.hThread);
     }
+    if(process_job)CloseHandle(process_job);
 #else
     if(pid>0) {
-      kill(pid,SIGTERM);
+      if(getpgid(pid)==pid)kill(-pid,SIGTERM);
+      else kill(pid,SIGTERM);
       bool exited=false;
       for(int attempt=0;attempt<25;++attempt) {
         int status=0;const auto rc=waitpid(pid,&status,WNOHANG);
