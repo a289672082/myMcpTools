@@ -1139,9 +1139,11 @@ struct ProcessState {
     // Cover writes as well as reads. If a child stops consuming stdin, the
     // watchdog closes the protocol by ending that child process.
     const auto deadline=std::chrono::steady_clock::now()+limits.timeout;
-    std::jthread watchdog([this,deadline](std::stop_token stop){
+    std::atomic_bool expired{false};
+    std::jthread watchdog([this,deadline,&expired](std::stop_token stop){
       while(!stop.stop_requested()){
         if(std::chrono::steady_clock::now()>=deadline){
+          expired=true;
 #ifdef _WIN32
           if(process.hProcess)TerminateProcess(process.hProcess,1);
 #else
@@ -1154,7 +1156,7 @@ struct ProcessState {
     });
     auto line=json::serialize(message)+"\n";
     if(fwrite(line.data(),1,line.size(),child_stdin)!=line.size()||fflush(child_stdin)!=0)
-      throw std::runtime_error("MCP child stdin closed");
+      throw std::runtime_error(expired ? "MCP stdio deadline exceeded" : "MCP child stdin closed");
     if(find(message,"id").is_null()) return nullptr;
     std::string output;
     for(;;){
@@ -1167,7 +1169,7 @@ struct ProcessState {
         DWORD available=0;
         auto handle=reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(child_stdout)));
         if(!PeekNamedPipe(handle,nullptr,0,nullptr,&available,nullptr))
-          throw std::runtime_error("MCP child stdout unavailable");
+          throw std::runtime_error(expired ? "MCP stdio deadline exceeded" : "MCP child stdout unavailable");
         if(!available){
           std::this_thread::sleep_for(std::chrono::milliseconds(std::min<long long>(remaining,10)));
           continue;
@@ -1181,13 +1183,13 @@ struct ProcessState {
 #ifdef _WIN32
         unsigned char byte=0;DWORD got=0;
         if(!ReadFile(handle,&byte,1,&got,nullptr)||got!=1)
-          throw std::runtime_error("MCP child stdout closed");
+          throw std::runtime_error(expired ? "MCP stdio deadline exceeded" : "MCP child stdout closed");
         ch=byte;
 #else
         unsigned char byte=0;
         const ssize_t got=read(fileno(child_stdout),&byte,1);
         if(got<0 && errno==EINTR)continue;
-        if(got!=1)throw std::runtime_error("MCP child stdout closed");
+        if(got!=1)throw std::runtime_error(expired ? "MCP stdio deadline exceeded" : "MCP child stdout closed");
         ch=byte;
 #endif
         if(ch=='\n')break;
