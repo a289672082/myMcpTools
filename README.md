@@ -254,3 +254,21 @@ To run a complete no-argument client/server pair, start `run_http_server_demo`, 
 ## All-in-one agent toolbox demo
 
 **`examples/run_agent_tools_demo.cpp`** is a single no-argument stdio MCP server that registers 23 useful tools across 10 groups: file reads/writes, directories, filename/content search, precise edits/patches, Git, allowlisted commands and a fixed build example, restricted HTTPS fetch/download, and C++ project inspection. The implementation has Chinese inline comments and runs within an automatically created `demo_workspace/` directory. It is intended for local Codex/Claude MCP experiments, **not** a hardened sandbox. See [examples/README.md](examples/README.md) for the complete tool matrix, security limits, and usage.
+
+
+## MCP 传输截止时间与资源限额（P0/P1）
+
+SDK 自带 Client::process / Client::http / Client::http_oauth 支持 RequestOptions（OAuth 刷新凭据阶段另有同步 I/O 限制）。默认 30 秒请求截止时间；超时或取消后，stdio 子进程被终止并回收。HTTP/SSE 响应在追加数据前检查大小。
+
+~~~cpp
+mymcp::RequestOptions limits;
+limits.timeout = std::chrono::seconds(2);
+limits.max_response_bytes = 256 * 1024;
+limits.cancelled = [&] { return stopped.load(); };
+auto client = mymcp::Client::process("/path/to/mcp-server");
+auto response = client.request("tools/list", mymcp::json::object{}, limits);
+~~~
+
+stdio 默认上限 8 MiB，HTTP SSE 帧默认上限 4 MiB。指定 max_response_bytes 时，也限制累计响应字节。显式 timeout=0 表示关闭截止时间，不建议用于不可信 MCP。
+
+注意：自定义 Client 回调、宿主 C++ 函数、OAuth 提供方的同步凭据处理及不合作的回调代码无法通过强杀线程安全中断。需要真正可终止的工具时，请使用独立 MCP stdio 子进程，并在 OS 层增加权限、资源和进程树隔离。

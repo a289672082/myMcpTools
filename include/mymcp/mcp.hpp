@@ -218,6 +218,14 @@ private:
   bool legacy_initialized_ = false;
 };
 
+// 每次 MCP 请求的资源约束。响应字节数 0 表示 SDK 默认上限；超时默认 30 秒，显式 0 表示不设截止时间。
+// Cancel callback 必须能安全地由调用线程读取；不可信进程建议使用 process() 隔离。
+struct RequestOptions {
+  std::chrono::milliseconds timeout{std::chrono::seconds(30)}; // 默认硬截止时间；0=显式无限制
+  std::size_t max_response_bytes = 0;
+  std::function<bool()> cancelled;
+};
+
 class Client {
 public:
   explicit Client(std::function<Json(const Json&)> send, std::string name = "mymcp-client");
@@ -234,11 +242,19 @@ public:
   // Blocks while a long-lived HTTP subscription is open. Return false to disconnect.
   static void listen_http(const std::string& url, Json notifications,
                           std::function<bool(const Json&)> on_event);
-  Json discover();
-  Json request(const std::string& method, Json params = json::object{});
+  // true 仅对 SDK 自带的 stdio/HTTP 传输成立；自定义进程内 lambda
+  // 无法保证回调支持强制超时，严格隔离场景必须拒绝它们。
+  bool has_bounded_transport() const noexcept {
+    return static_cast<bool>(send_bounded_) && !requires_oauth_refresh_ &&
+           !has_untrusted_callback_ && !input_handler_;
+  }
+  Json discover(const RequestOptions& options = {});
+  Json request(const std::string& method, Json params = json::object{},
+               const RequestOptions& options = {});
   Json request_with_progress(const std::string& method, Json params, Json progress_token);
   Json tools();
-  Json call(const std::string& name, Json arguments = json::object{});
+  Json call(const std::string& name, Json arguments = json::object{},
+            const RequestOptions& options = {});
   Json resources();
   Json read(const std::string& uri);
   Json prompts();
@@ -250,7 +266,8 @@ public:
   Json cancel_task(const std::string& task_id);
   Json complete(Json ref, std::string argument_name, std::string value,
                 Json context = json::object{});
-  Json list_all(const std::string& method, const std::string& array_field);
+  Json list_all(const std::string& method, const std::string& array_field,
+                const RequestOptions& options = {});
   void extension(std::string name, Json settings = json::object{});
   Json capabilities() const { return capabilities_; }
   // Callback receives inputRequests and returns a JSON object keyed by request IDs.
@@ -261,6 +278,7 @@ public:
   }
 private:
   std::function<Json(const Json&)> send_;
+  std::function<Json(const Json&, const RequestOptions&)> send_bounded_;
   std::string name_;
   long long next_id_ = 1;
   Json capabilities_ = json::object{};
@@ -270,6 +288,8 @@ private:
   Json discovery_ = nullptr;
   bool http_ = false;
   bool tools_known_ = false;
+  bool requires_oauth_refresh_ = false; // OAuth token acquisition currently has separate I/O.
+  bool has_untrusted_callback_ = false; // C++ notification callback may never return.
   std::function<Json(const Json&)> input_handler_;
 };
 

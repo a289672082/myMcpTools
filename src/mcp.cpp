@@ -21,6 +21,10 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <signal.h>
+#include <poll.h>
+#include <fcntl.h>
+#include <cerrno>
+#include <pthread.h>
 #endif
 #include <algorithm>
 #include <cctype>
@@ -1060,6 +1064,8 @@ struct ProcessState {
   std::mutex mutex;
   FILE* child_stdout = nullptr;
   FILE* child_stdin = nullptr;
+  std::string stdout_pending;
+  bool dead = false;
 #ifdef _WIN32
   PROCESS_INFORMATION process{};
 #else
@@ -1112,32 +1118,189 @@ struct ProcessState {
 #endif
     if(!child_stdin||!child_stdout)throw std::runtime_error("stdio stream creation failed");
   }
+  // Never wait forever for a child which ignores SIGTERM.
+  void terminate_child() noexcept {
+    dead=true;
+#ifdef _WIN32
+    if(process.hProcess) {
+      TerminateProcess(process.hProcess,1);
+      WaitForSingleObject(process.hProcess,2000);
+    }
+#else
+    if(pid>0) {
+      kill(pid,SIGKILL);
+      for(int attempt=0;attempt<200;++attempt) {
+        int status=0;
+        const auto rc=waitpid(pid,&status,WNOHANG);
+        if(rc==pid || (rc<0 && errno==ECHILD)) {pid=-1;break;}
+        if(rc<0 && errno!=EINTR)break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+    }
+#endif
+  }
   ~ProcessState() {
     if(child_stdin)fclose(child_stdin);
 #ifdef _WIN32
-    if(process.hProcess) {TerminateProcess(process.hProcess,0);WaitForSingleObject(process.hProcess,2000);CloseHandle(process.hProcess);CloseHandle(process.hThread);}
+    if(process.hProcess) {
+      if(WaitForSingleObject(process.hProcess,0)==WAIT_TIMEOUT)terminate_child();
+      CloseHandle(process.hProcess);
+      CloseHandle(process.hThread);
+    }
 #else
-    if(pid>0){kill(pid,SIGTERM);waitpid(pid,nullptr,0);}
+    if(pid>0) {
+      kill(pid,SIGTERM);
+      bool exited=false;
+      for(int attempt=0;attempt<25;++attempt) {
+        int status=0;const auto rc=waitpid(pid,&status,WNOHANG);
+        if(rc==pid || (rc<0 && errno==ECHILD)) {exited=true;pid=-1;break;}
+        if(rc<0 && errno!=EINTR)break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      if(!exited)terminate_child();
+    }
 #endif
     if(child_stdout)fclose(child_stdout);
   }
-  Json send(const Json& message) {
+  Json send(const Json& message, const RequestOptions& options = {}) {
     std::lock_guard lock(mutex);
-    auto line=json::serialize(message)+"\n";
-    if(fwrite(line.data(),1,line.size(),child_stdin)!=line.size()||fflush(child_stdin)!=0)
-      throw std::runtime_error("MCP child stdin closed");
-    if(find(message,"id").is_null()) return nullptr;
-    std::string output;
-    for(;;){
-      output.clear();int ch;
-      while((ch=fgetc(child_stdout))!=EOF && ch!='\n'){
-        if(output.size()>8*1024*1024)throw std::runtime_error("MCP stdout message too large");
-        output+=char(ch);
+    if(dead)throw std::runtime_error("MCP child is no longer available");
+    const auto deadline=options.timeout.count()>0
+        ? std::chrono::steady_clock::now()+options.timeout
+        : std::chrono::steady_clock::time_point::max();
+    const auto limit=options.max_response_bytes ? options.max_response_bytes
+                                                 : std::size_t{8}*1024*1024;
+    const auto check=[&]() {
+      if(options.cancelled && options.cancelled()) {
+        terminate_child();throw std::runtime_error("MCP stdio request cancelled");
       }
-      if(ch==EOF)throw std::runtime_error("MCP child stdout closed");
-      Json msg=json::parse(output);
-      if(find(msg,"id")==find(message,"id"))return msg;
-      if(find(msg,"method").is_string() && on_notification)on_notification(msg);
+      if(std::chrono::steady_clock::now()>=deadline) {
+        terminate_child();throw std::runtime_error("MCP stdio request deadline exceeded");
+      }
+    };
+    auto line=json::serialize(message)+"\n";
+    check();
+#ifdef _WIN32
+    // A synchronous Windows pipe write can block when the child stops reading.
+    // Perform it on a dedicated I/O thread and cancel that exact thread's
+    // pending synchronous I/O when the child is terminated on deadline.
+    std::atomic_bool write_done{false};
+    std::exception_ptr write_error;
+    std::thread writer([&] {
+      try {
+        const auto fd=_fileno(child_stdin);
+        HANDLE handle=reinterpret_cast<HANDLE>(_get_osfhandle(fd));
+        std::size_t offset=0;
+        while(offset<line.size()) {
+          DWORD written=0;
+          const DWORD count=static_cast<DWORD>(std::min<std::size_t>(
+              line.size()-offset,65536));
+          if(!WriteFile(handle,line.data()+offset,count,&written,nullptr)
+              || written==0)
+            throw std::runtime_error("MCP child stdin closed");
+          offset+=written;
+        }
+      } catch(...) {write_error=std::current_exception();}
+      write_done.store(true,std::memory_order_release);
+    });
+    bool write_timed_out=false;
+    while(!write_done.load(std::memory_order_acquire)) {
+      try {check();}
+      catch(...) {
+        write_timed_out=true;
+        CancelSynchronousIo(static_cast<HANDLE>(writer.native_handle()));
+        // Killing the child closes its read end and releases pipe writers.
+        terminate_child();
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    writer.join();
+    if(write_timed_out)
+      throw std::runtime_error("MCP stdio write cancelled or timed out");
+    if(write_error)std::rethrow_exception(write_error);
+#else
+    // O_NONBLOCK + poll handles children which never read from stdin.
+    const int input_fd=fileno(child_stdin);
+    const int old_flags=fcntl(input_fd,F_GETFL,0);
+    if(old_flags<0 || fcntl(input_fd,F_SETFL,old_flags|O_NONBLOCK)<0)
+      throw std::runtime_error("Cannot configure MCP stdin nonblocking I/O");
+    std::size_t sent=0;
+    while(sent<line.size()) {
+      check();
+      pollfd fd{input_fd,POLLOUT,0};
+      const int ready=poll(&fd,1,10);
+      if(ready<0 && errno==EINTR)continue;
+      if(ready<0)throw std::runtime_error("MCP stdin poll failed");
+      if(ready==0)continue;
+      if(fd.revents&(POLLERR|POLLHUP|POLLNVAL))
+        throw std::runtime_error("MCP child stdin closed");
+      // A disconnected child must raise EPIPE, never terminate the Agent via
+      // process-wide SIGPIPE. Block SIGPIPE on this I/O thread only, then
+      // consume a newly generated pending signal before restoring its mask.
+      sigset_t blocked,old_mask,pending_before;
+      sigemptyset(&blocked);sigaddset(&blocked,SIGPIPE);
+      if(pthread_sigmask(SIG_BLOCK,&blocked,&old_mask)!=0)
+        throw std::runtime_error("Cannot mask MCP pipe signals");
+      sigpending(&pending_before);
+      const bool prior_sigpipe=sigismember(&pending_before,SIGPIPE)==1;
+      const auto bytes=::write(input_fd,line.data()+sent,line.size()-sent);
+      const int write_error=errno;
+      if(bytes<0 && write_error==EPIPE && !prior_sigpipe) {
+        timespec immediate{0,0};
+        (void)sigtimedwait(&blocked,nullptr,&immediate);
+      }
+      pthread_sigmask(SIG_SETMASK,&old_mask,nullptr);
+      if(bytes<0 && (write_error==EINTR||write_error==EAGAIN))continue;
+      if(bytes<=0)throw std::runtime_error("MCP child stdin write failed");
+      sent+=static_cast<std::size_t>(bytes);
+    }
+#endif
+    if(find(message,"id").is_null())return nullptr;
+    for(;;) {
+      check();
+      const auto newline=stdout_pending.find('\n');
+      if(newline!=std::string::npos) {
+        const std::string output=stdout_pending.substr(0,newline);
+        stdout_pending.erase(0,newline+1);
+        if(output.size()>limit) {
+          terminate_child();throw std::runtime_error("MCP stdout message too large");
+        }
+        Json msg=json::parse(output);
+        if(find(msg,"id")==find(message,"id"))return msg;
+        if(find(msg,"method").is_string() && on_notification)on_notification(msg);
+        continue;
+      }
+      char buffer[4096];std::size_t received=0;
+#ifdef _WIN32
+      HANDLE handle=reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(child_stdout)));
+      DWORD available=0;
+      if(!PeekNamedPipe(handle,nullptr,0,nullptr,&available,nullptr))
+        throw std::runtime_error("MCP child stdout closed");
+      if(!available) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        continue;
+      }
+      DWORD bytes=0;
+      if(!ReadFile(handle,buffer,std::min<DWORD>(available,sizeof(buffer)),&bytes,nullptr)
+          || !bytes)
+        throw std::runtime_error("MCP child stdout read failed");
+      received=bytes;
+#else
+      pollfd fd{fileno(child_stdout),POLLIN,0};
+      const int ready=poll(&fd,1,10);
+      if(ready<0 && errno==EINTR)continue;
+      if(ready<0)throw std::runtime_error("MCP stdout poll failed");
+      if(!ready)continue;
+      const auto bytes=::read(fd.fd,buffer,sizeof(buffer));
+      if(bytes<0 && (errno==EINTR||errno==EAGAIN))continue;
+      if(bytes<=0)throw std::runtime_error("MCP child stdout closed");
+      received=static_cast<std::size_t>(bytes);
+#endif
+      if(received>limit || stdout_pending.size()>limit-received) {
+        terminate_child();throw std::runtime_error("MCP stdout message too large");
+      }
+      stdout_pending.append(buffer,received);
     }
   }
 };
@@ -1171,8 +1334,16 @@ struct HttpState {
   std::shared_ptr<oauth::Session> oauth_session;
   std::function<void(const Json&)> on_notification;
   explicit HttpState(const std::string& path,std::string bearer):url(parse_url(path)),token(std::move(bearer)){}
-  Json send(const Json& msg) {
+  Json send(const Json& msg, const RequestOptions& options = {}) {
     std::lock_guard lock(mutex);
+    const auto deadline=options.timeout.count()>0
+      ? std::chrono::steady_clock::now()+options.timeout
+      : std::chrono::steady_clock::time_point::max();
+    const auto expired=[&] {
+      return (options.cancelled && options.cancelled()) ||
+             std::chrono::steady_clock::now()>=deadline;
+    };
+    if(expired())throw std::runtime_error("MCP HTTP request cancelled or timed out");
     const auto method=string_of(msg,"method");
     const Json& params=find(msg,"params");
     httplib::Headers headers{{"Accept","application/json, text/event-stream"}};
@@ -1196,18 +1367,61 @@ struct HttpState {
       }
     }
     auto c=new_http_client(url);
+    if(options.timeout.count()>0) {
+      const auto bound=std::max(std::chrono::milliseconds(1),options.timeout);
+      const auto connection=std::min(bound,std::chrono::milliseconds(5000));
+      const auto to_times=[](std::chrono::milliseconds time) {
+        return std::pair<time_t,time_t>{static_cast<time_t>(time.count()/1000),
+                                        static_cast<time_t>((time.count()%1000)*1000)};
+      };
+      const auto [cs,cu]=to_times(connection);
+      const auto [rs,ru]=to_times(std::min(bound,std::chrono::milliseconds(30000)));
+      c->set_connection_timeout(cs,cu);
+      c->set_read_timeout(rs,ru);
+      c->set_write_timeout(rs,ru);
+      // cpp-httplib's max_timeout is a *whole-request* deadline, unlike
+      // read_timeout which is refreshed by every received chunk.
+      c->set_max_timeout(bound);
+    }
+    // Stop a transport blocked inside the socket when the caller cancels
+    // before another read callback occurs. Client::stop() is thread-safe.
+    std::jthread cancel_watcher;
+    if(options.cancelled) {
+      const auto cancelled=options.cancelled;
+      // Capture the callback BY VALUE: the watcher outlives this if-block.
+      cancel_watcher=std::jthread([&,cancelled](std::stop_token stop) {
+        while(!stop.stop_requested()) {
+          if(cancelled()) {c->stop();return;}
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+      });
+    }
     // Read SSE progressively rather than buffering the response body until
     // completion. A progress notification can now reach the app immediately.
     std::string pending;
     std::string decode_error;
+    std::size_t received_total=0;
+    // Limit individual frames and the overall response when a caller
+    // supplies a tighter transport budget.
+    const auto frame_limit=options.max_response_bytes
+        ? std::min(options.max_response_bytes,std::size_t{4}*1024*1024)
+        : std::size_t{4}*1024*1024;
     Json streamed_result = nullptr;
     auto response=c->Post(url.target, headers, json::serialize(msg), "application/json",
       [&](const char* data, std::size_t length) -> bool {
-        pending.append(data, length);
-        if (pending.size() > 4 * 1024 * 1024) {
-          decode_error = "HTTP response/SSE frame too large";
+        if(expired()) {
+          decode_error="MCP HTTP request cancelled or timed out";
           return false;
         }
+        if(length>frame_limit || pending.size()>frame_limit-length ||
+           (options.max_response_bytes &&
+            (received_total>options.max_response_bytes ||
+             length>options.max_response_bytes-received_total))) {
+          decode_error="HTTP response/SSE frame too large";
+          return false;
+        }
+        received_total+=length;
+        pending.append(data,length);
         for (;;) {
           auto end = pending.find("\n\n");
           if (end == std::string::npos) break;
@@ -1239,6 +1453,7 @@ struct HttpState {
         return true;
       });
     if (!decode_error.empty()) throw std::runtime_error(decode_error);
+    if(expired())throw std::runtime_error("MCP HTTP request cancelled or timed out");
     if(!response)throw std::runtime_error("HTTP transport error: "+httplib::to_string(response.error()));
     if(response->status==202)return nullptr;
     if(response->get_header_value("Content-Type").starts_with("text/event-stream")){
@@ -1288,30 +1503,65 @@ Client::Client(std::function<Json(const Json&)> send, std::string name)
     : send_(std::move(send)), name_(std::move(name)) {}
 Client Client::process(const std::string& executable, std::vector<std::string> args,
                        std::function<void(const Json&)> on_notification) {
+  const bool callback_present=static_cast<bool>(on_notification);
   auto state = std::make_shared<ProcessState>(executable, args, std::move(on_notification));
-  return Client([state](const Json& message){ return state->send(message); });
+  Client client([state](const Json& message){ return state->send(message); });
+  client.send_bounded_=[state](const Json& message,const RequestOptions& options) {
+    return state->send(message,options);
+  };
+  client.has_untrusted_callback_=callback_present;
+  return client;
 }
 Client Client::http(const std::string& url, std::string bearer_token,
                     std::function<void(const Json&)> on_notification) {
+  const bool callback_present=static_cast<bool>(on_notification);
   auto state = std::make_shared<HttpState>(url, std::move(bearer_token));
   state->on_notification = std::move(on_notification);
   Client client([state](const Json& message){ return state->send(message); });
+  client.send_bounded_=[state](const Json& message,const RequestOptions& options) {
+    return state->send(message,options);
+  };
   client.http_ = true;
+  client.has_untrusted_callback_=callback_present;
   return client;
 }
 Client Client::http_oauth(const std::string& url, std::shared_ptr<oauth::Session> session,
                           std::function<void(const Json&)> on_notification) {
+  const bool callback_present=static_cast<bool>(on_notification);
   if (!session) throw std::invalid_argument("OAuth session is null");
   auto state = std::make_shared<HttpState>(url, std::string{});
   state->oauth_session = std::move(session);
   state->on_notification = std::move(on_notification);
   Client client([state](const Json& message){ return state->send(message); });
+  client.send_bounded_=[state](const Json& message,const RequestOptions& options) {
+    return state->send(message,options);
+  };
   client.http_ = true;
+  client.requires_oauth_refresh_ = true; // refresh() may block outside HTTP request budget
+  client.has_untrusted_callback_=callback_present;
   return client;
 }
-Json Client::request(const std::string& method, Json params) {
+Json Client::request(const std::string& method, Json params,
+                     const RequestOptions& options) {
   if (!params.is_object()) throw std::invalid_argument("Request params must be an object");
-  if (!connected_ && method != "server/discover" && method != "initialize") discover();
+  const auto deadline=options.timeout.count()>0
+      ? std::chrono::steady_clock::now()+options.timeout
+      : std::chrono::steady_clock::time_point::max();
+  const auto budget=[&]() {
+    if(options.cancelled && options.cancelled())
+      throw std::runtime_error("MCP request cancelled");
+    RequestOptions next=options;
+    if(deadline!=std::chrono::steady_clock::time_point::max()) {
+      if(std::chrono::steady_clock::now()>=deadline)
+        throw std::runtime_error("MCP request deadline exceeded");
+      next.timeout=std::max(std::chrono::milliseconds{1},
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+          deadline-std::chrono::steady_clock::now()));
+    }
+    return next;
+  };
+  if (!connected_ && method != "server/discover" && method != "initialize")
+    discover(budget());
   for (int round = 0; round < 9; ++round) {
     Json actual_params = params;
     if (!legacy_) {
@@ -1323,7 +1573,12 @@ Json Client::request(const std::string& method, Json params) {
       actual_params["_meta"] = std::move(metadata);
     }
     Json message = json::object{{"jsonrpc", "2.0"}, {"id", next_id_++}, {"method", method}, {"params", std::move(actual_params)}};
-    Json response = send_(message);
+    const auto request_options=budget();
+    Json response=send_bounded_ ? send_bounded_(message,request_options)
+                                : send_(message);
+    // A custom in-process sender cannot be forcibly interrupted. Still
+    // report expiration if it returned after the requested deadline.
+    (void)budget();
     if (!response.is_object()) throw std::runtime_error("Invalid JSON-RPC response");
     if (find(response, "id") != find(message, "id")) throw std::runtime_error("JSON-RPC response ID mismatch");
     const Json& e = find(response, "error");
@@ -1352,10 +1607,26 @@ Json Client::request_with_progress(const std::string& method, Json params, Json 
   params["_meta"] = std::move(metadata);
   return request(method, std::move(params));
 }
-Json Client::discover() {
+Json Client::discover(const RequestOptions& options) {
   if (connected_) return discovery_;
+  const auto deadline=options.timeout.count()>0
+      ? std::chrono::steady_clock::now()+options.timeout
+      : std::chrono::steady_clock::time_point::max();
+  const auto remaining=[&] {
+    if(options.cancelled && options.cancelled())
+      throw std::runtime_error("MCP discovery cancelled");
+    auto request_options=options;
+    if(deadline!=std::chrono::steady_clock::time_point::max()) {
+      if(std::chrono::steady_clock::now()>=deadline)
+        throw std::runtime_error("MCP discovery deadline exceeded");
+      request_options.timeout=std::max(std::chrono::milliseconds{1},
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+          deadline-std::chrono::steady_clock::now()));
+    }
+    return request_options;
+  };
   try {
-    Json info = request("server/discover");
+    Json info = request("server/discover",json::object{},remaining());
     const auto& versions = find(info, "supportedVersions");
     if (!versions.is_array()) throw Error(-32600, "Malformed discovery response");
     for (const auto& version : versions.array_range()) {
@@ -1373,18 +1644,21 @@ Json Client::discover() {
   legacy_ = true;
   Json init = request("initialize", json::object{{"protocolVersion", LegacyProtocolVersion},
                                      {"clientInfo", json::object{{"name", name_}, {"version", "1.0.0"}}},
-                                     {"capabilities", json::object{}}});
+                                     {"capabilities", json::object{}}},remaining());
   connected_ = true;
   discovery_ = init;
   // The legacy notifications/initialized message has no response. Send it directly.
   Json notification = json::object{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}};
-  send_(notification);
+  if(send_bounded_) (void)send_bounded_(notification,remaining());
+  else (void)send_(notification);
   return init;
 }
 Json Client::tools() { return request("tools/list"); }
-Json Client::call(const std::string& name, Json arguments) {
-  if (http_ && !tools_known_) list_all("tools/list", "tools"); // discover paginated header annotations
-  return request("tools/call", json::object{{"name", name}, {"arguments", std::move(arguments)}});
+Json Client::call(const std::string& name, Json arguments,
+                  const RequestOptions& options) {
+  if (http_ && !tools_known_) list_all("tools/list", "tools",options);
+  return request("tools/call",
+    json::object{{"name", name}, {"arguments", std::move(arguments)}},options);
 }
 Json Client::resources() { return request("resources/list"); }
 Json Client::read(const std::string& uri) { return request("resources/read", json::object{{"uri", uri}}); }
@@ -1407,14 +1681,28 @@ void Client::extension(std::string name, Json settings) {
   if (!capabilities_.contains("extensions")) capabilities_["extensions"] = json::object{};
   capabilities_.at("extensions")[name] = std::move(settings);
 }
-Json Client::list_all(const std::string& method, const std::string& array_field) {
+Json Client::list_all(const std::string& method, const std::string& array_field,
+                      const RequestOptions& options) {
+  const auto deadline=options.timeout.count()>0
+      ? std::chrono::steady_clock::now()+options.timeout
+      : std::chrono::steady_clock::time_point::max();
   if (method != "tools/list" && method != "resources/list" && method != "prompts/list" &&
       method != "resources/templates/list") throw std::invalid_argument("Not a list operation");
   Json combined = json::array{};
   std::set<std::string> visited;
   Json params = json::object{};
   for (size_t i = 0; i < 10000; ++i) {
-    auto response = request(method, params);
+    auto per_page=options;
+    if(options.cancelled && options.cancelled())
+      throw std::runtime_error("MCP catalog discovery cancelled");
+    if(deadline!=std::chrono::steady_clock::time_point::max()) {
+      if(std::chrono::steady_clock::now()>=deadline)
+        throw std::runtime_error("MCP catalog deadline exceeded");
+      per_page.timeout=std::max(std::chrono::milliseconds{1},
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+          deadline-std::chrono::steady_clock::now()));
+    }
+    auto response=request(method,params,per_page);
     if (!find(response, array_field).is_array()) throw Error(-32603, "Invalid list response");
     for (const auto& item : find(response, array_field).array_range()) combined.push_back(item);
     const auto& next = find(response, "nextCursor");
